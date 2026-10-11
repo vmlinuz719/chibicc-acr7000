@@ -177,7 +177,7 @@ static bool is_keyword(Token *tok) {
   return hashmap_get2(&map, tok->loc, tok->len);
 }
 
-static int read_escaped_char(char **new_pos, char *p) {
+static int64_t read_escaped_char(char **new_pos, char *p) {
   if ('0' <= *p && *p <= '7') {
     // Read an octal number.
     int c = *p++ - '0';
@@ -196,9 +196,11 @@ static int read_escaped_char(char **new_pos, char *p) {
     if (!isxdigit(*p))
       error_at(p, "invalid hex escape sequence");
 
-    int c = 0;
+    uint64_t c = 0;
     for (; isxdigit(*p); p++)
       c = (c << 4) + from_hex(*p);
+    if (c >> WORD_BITS)
+      error_at(p, "hex escape sequence out of range");
     *new_pos = p;
     return c;
   }
@@ -248,10 +250,17 @@ static Token *read_string_literal(char *start, char *quote) {
   int len = 0;
 
   for (char *p = quote + 1; p < end;) {
-    if (*p == '\\')
-      buf[len++] = read_escaped_char(&p, p + 1);
-    else
+    if (*p == '\\') {
+      char *esc = p;
+      int64_t c = read_escaped_char(&p, p + 1);
+      // Narrow string literals are held as bytes while compiling.
+      if (c > 0xff)
+        error_at(esc, "escape sequence out of range for a narrow string literal "
+                 "(this implementation supports values up to 0xff)");
+      buf[len++] = c;
+    } else {
       buf[len++] = *p++;
+    }
   }
 
   Token *tok = new_token(TK_STR, start, end + 1);
@@ -323,7 +332,7 @@ static Token *read_char_literal(char *start, char *quote, Type *ty) {
   if (*p == '\0')
     error_at(start, "unclosed char literal");
 
-  int c;
+  int64_t c;
   if (*p == '\\')
     c = read_escaped_char(&p, p + 1);
   else
@@ -354,7 +363,9 @@ static bool convert_pp_int(Token *tok) {
     base = 8;
   }
 
-  int64_t val = strtoul(p, &p, base);
+  errno = 0;
+  int64_t val = strtoull(p, &p, base);
+  bool too_large = (errno == ERANGE);
 
   // Read U, L or LL suffixes.
   bool l = false;
@@ -383,33 +394,39 @@ static bool convert_pp_int(Token *tok) {
   if (p != tok->loc + tok->len)
     return false;
 
-  // Infer a type.
+  // Infer a type. int, long and long long are all one 36-bit word; like
+  // GCC with constants too large for any type, warn and truncate.
+  if (too_large || ((uint64_t)val >> WORD_BITS)) {
+    warn_tok(tok, "integer constant does not fit in a 36-bit word; truncated");
+    val &= WORD_MASK;
+  }
+
+  bool fits_signed = !((uint64_t)val >> (WORD_BITS - 1));
   Type *ty;
   if (base == 10) {
     if (l && u)
       ty = ty_ulong;
     else if (l)
-      ty = ty_long;
+      ty = fits_signed ? ty_long : ty_ulong;
     else if (u)
-      ty = (val >> 32) ? ty_ulong : ty_uint;
+      ty = ty_uint;
     else
-      ty = (val >> 31) ? ty_long : ty_int;
+      ty = fits_signed ? ty_int : ty_long;
   } else {
     if (l && u)
       ty = ty_ulong;
     else if (l)
-      ty = (val >> 63) ? ty_ulong : ty_long;
+      ty = fits_signed ? ty_long : ty_ulong;
     else if (u)
-      ty = (val >> 32) ? ty_ulong : ty_uint;
-    else if (val >> 63)
-      ty = ty_ulong;
-    else if (val >> 32)
-      ty = ty_long;
-    else if (val >> 31)
       ty = ty_uint;
     else
-      ty = ty_int;
+      ty = fits_signed ? ty_int : ty_uint;
   }
+
+  // Decimal constants that only fit as unsigned keep their value; give
+  // them an unsigned type rather than a negative signed one.
+  if (!fits_signed && !ty->is_unsigned)
+    ty = (ty->kind == TY_LONG) ? ty_ulong : ty_uint;
 
   tok->kind = TK_NUM;
   tok->val = val;
@@ -478,7 +495,7 @@ static void add_line_numbers(Token *tok) {
 
 Token *tokenize_string_literal(Token *tok, Type *basety) {
   Token *t;
-  if (basety->size == 2)
+  if (basety->kind == TY_SHORT)
     t = read_utf16_string_literal(tok->loc, tok->loc);
   else
     t = read_utf32_string_literal(tok->loc, tok->loc, basety);
@@ -585,7 +602,7 @@ Token *tokenize(File *file) {
     // Character literal
     if (*p == '\'') {
       cur = cur->next = read_char_literal(p, p, ty_int);
-      cur->val = (char)cur->val;
+      cur->val = wrap_word(cur->val, false); // char is 36 bits
       p += cur->len;
       continue;
     }

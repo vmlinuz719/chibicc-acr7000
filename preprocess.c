@@ -1059,46 +1059,45 @@ static char *format_time(struct tm *tm) {
 
 void init_macros(void) {
   // Define predefined macros
-  define_macro("_LP64", "1");
+  // Target: ACR-7000, 36-bit words, word addressing. Every integer type
+  // and pointer is one word, so CHAR_BIT is 36.
+  define_macro("__ACR7000__", "1");
+  define_macro("__acr7000__", "1");
   define_macro("__C99_MACRO_WITH_VA_ARGS", "1");
-  define_macro("__ELF__", "1");
-  define_macro("__LP64__", "1");
-  define_macro("__SIZEOF_DOUBLE__", "8");
-  define_macro("__SIZEOF_FLOAT__", "4");
-  define_macro("__SIZEOF_INT__", "4");
-  define_macro("__SIZEOF_LONG_DOUBLE__", "8");
-  define_macro("__SIZEOF_LONG_LONG__", "8");
-  define_macro("__SIZEOF_LONG__", "8");
-  define_macro("__SIZEOF_POINTER__", "8");
-  define_macro("__SIZEOF_PTRDIFF_T__", "8");
-  define_macro("__SIZEOF_SHORT__", "2");
-  define_macro("__SIZEOF_SIZE_T__", "8");
+  define_macro("__CHAR_BIT__", "36");
+  define_macro("__SIZEOF_DOUBLE__", "2");
+  define_macro("__SIZEOF_FLOAT__", "1");
+  define_macro("__SIZEOF_INT__", "1");
+  define_macro("__SIZEOF_LONG_DOUBLE__", "2");
+  define_macro("__SIZEOF_LONG_LONG__", "1");
+  define_macro("__SIZEOF_LONG__", "1");
+  define_macro("__SIZEOF_POINTER__", "1");
+  define_macro("__SIZEOF_PTRDIFF_T__", "1");
+  define_macro("__SIZEOF_SHORT__", "1");
+  define_macro("__SIZEOF_SIZE_T__", "1");
   define_macro("__SIZE_TYPE__", "unsigned long");
+  define_macro("__PTRDIFF_TYPE__", "long");
+  define_macro("__WCHAR_TYPE__", "int");
+  define_macro("__INT_MAX__", "34359738367");
+  define_macro("__LONG_MAX__", "34359738367L");
+  define_macro("__LONG_LONG_MAX__", "34359738367LL");
+  define_macro("__SCHAR_MAX__", "34359738367");
+  define_macro("__SHRT_MAX__", "34359738367");
   define_macro("__STDC_HOSTED__", "1");
   define_macro("__STDC_NO_COMPLEX__", "1");
+  define_macro("__STDC_NO_THREADS__", "1");
   define_macro("__STDC_UTF_16__", "1");
   define_macro("__STDC_UTF_32__", "1");
   define_macro("__STDC_VERSION__", "201112L");
   define_macro("__STDC__", "1");
   define_macro("__USER_LABEL_PREFIX__", "");
   define_macro("__alignof__", "_Alignof");
-  define_macro("__amd64", "1");
-  define_macro("__amd64__", "1");
   define_macro("__chibicc__", "1");
   define_macro("__const__", "const");
-  define_macro("__gnu_linux__", "1");
   define_macro("__inline__", "inline");
-  define_macro("__linux", "1");
-  define_macro("__linux__", "1");
   define_macro("__signed__", "signed");
   define_macro("__typeof__", "typeof");
-  define_macro("__unix", "1");
-  define_macro("__unix__", "1");
   define_macro("__volatile__", "volatile");
-  define_macro("__x86_64", "1");
-  define_macro("__x86_64__", "1");
-  define_macro("linux", "1");
-  define_macro("unix", "1");
 
   add_builtin("__FILE__", file_macro);
   add_builtin("__LINE__", line_macro);
@@ -1154,9 +1153,9 @@ static void join_adjacent_string_literals(Token *tok) {
       }
     }
 
-    if (basety->size > 1)
+    if (basety->kind != TY_CHAR)
       for (Token *t = tok1; t->kind == TK_STR; t = t->next)
-        if (t->ty->base->size == 1)
+        if (t->ty->base->kind == TY_CHAR)
           *t = *tokenize_string_literal(t, basety);
 
     while (tok1->kind == TK_STR)
@@ -1178,12 +1177,15 @@ static void join_adjacent_string_literals(Token *tok) {
     for (Token *t = tok1->next; t != tok2; t = t->next)
       len = len + t->ty->array_len - 1;
 
-    char *buf = calloc(tok1->ty->base->size, len);
+    // Token string buffers hold host-sized elements (bytes for narrow
+    // strings, uint16_t/uint32_t for wide ones), not target words.
+    int esz = host_char_size(tok1->ty->base);
+    char *buf = calloc(esz, len);
 
     int i = 0;
     for (Token *t = tok1; t != tok2; t = t->next) {
-      memcpy(buf + i, t->str, t->ty->size);
-      i = i + t->ty->size - t->ty->base->size;
+      memcpy(buf + i, t->str, t->ty->array_len * esz);
+      i = i + (t->ty->array_len - 1) * esz;
     }
 
     *tok1 = *copy_token(tok1);
@@ -1191,6 +1193,15 @@ static void join_adjacent_string_literals(Token *tok) {
     tok1->str = buf;
     tok1->next = tok2;
     tok1 = tok2;
+  }
+}
+
+// Size in host bytes of one element of a string literal token's buffer.
+int host_char_size(Type *basety) {
+  switch (basety->kind) {
+  case TY_CHAR: return 1;
+  case TY_SHORT: return 2;
+  default: return 4;
   }
 }
 

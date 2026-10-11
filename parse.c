@@ -24,7 +24,7 @@ typedef struct {
   Obj *var;
   Type *type_def;
   Type *enum_ty;
-  int enum_val;
+  int64_t enum_val;
 } VarScope;
 
 // Represents a block scope.
@@ -333,9 +333,21 @@ static Obj *new_anon_gvar(Type *ty) {
   return new_gvar(new_unique_name(), ty);
 }
 
+// Element `i` of a string literal token's host buffer, whose element
+// type is given by `basety` (bytes, uint16_t or uint32_t).
+static uint64_t str_elem(char *p, Type *basety, int i) {
+  switch (host_char_size(basety)) {
+  case 1: return (unsigned char)p[i];
+  case 2: return ((uint16_t *)p)[i];
+  default: return ((uint32_t *)p)[i];
+  }
+}
+
 static Obj *new_string_literal(char *p, Type *ty) {
   Obj *var = new_anon_gvar(ty);
-  var->init_data = p;
+  var->init_data = calloc(ty->size, sizeof(uint64_t));
+  for (int i = 0; i < ty->array_len; i++)
+    var->init_data[i] = str_elem(p, ty->base, i);
   return var;
 }
 
@@ -772,7 +784,7 @@ static Type *enum_specifier(Token **rest, Token *tok) {
 
   // Read an enum-list.
   int i = 0;
-  int val = 0;
+  int64_t val = 0;
   while (!consume_end(rest, tok)) {
     if (i++ > 0)
       tok = skip(tok, ",");
@@ -833,6 +845,7 @@ static Node *compute_vla_size(Type *ty, Token *tok) {
 
 static Node *new_alloca(Node *sz) {
   Node *node = new_unary(ND_FUNCALL, new_var_node(builtin_alloca, sz->tok), sz->tok);
+  current_fn->uses_alloca = true;
   node->func_ty = builtin_alloca->ty;
   node->ty = builtin_alloca->ty->return_ty;
   node->args = sz;
@@ -890,6 +903,8 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, VarAttr *attr) 
     Obj *var = new_lvar(get_ident(ty->name), ty);
     if (attr && attr->align)
       var->align = attr->align;
+    if (attr && attr->align > 1)
+      warn_tok(ty->name, "alignment of variables is not supported on the ACR-7000; ignored");
 
     if (equal(tok, "=")) {
       Node *expr = lvar_initializer(&tok, tok->next, var);
@@ -925,28 +940,8 @@ static void string_initializer(Token **rest, Token *tok, Initializer *init) {
 
   int len = MIN(init->ty->array_len, tok->ty->array_len);
 
-  switch (init->ty->base->size) {
-  case 1: {
-    char *str = tok->str;
-    for (int i = 0; i < len; i++)
-      init->children[i]->expr = new_num(str[i], tok);
-    break;
-  }
-  case 2: {
-    uint16_t *str = (uint16_t *)tok->str;
-    for (int i = 0; i < len; i++)
-      init->children[i]->expr = new_num(str[i], tok);
-    break;
-  }
-  case 4: {
-    uint32_t *str = (uint32_t *)tok->str;
-    for (int i = 0; i < len; i++)
-      init->children[i]->expr = new_num(str[i], tok);
-    break;
-  }
-  default:
-    unreachable();
-  }
+  for (int i = 0; i < len; i++)
+    init->children[i]->expr = new_num(str_elem(tok->str, tok->ty->base, i), tok);
 
   *rest = tok->next;
 }
@@ -1381,40 +1376,34 @@ static Node *lvar_initializer(Token **rest, Token *tok, Obj *var) {
   // that unspecified elements are set to 0. Here, we simply
   // zero-initialize the entire memory region of a variable before
   // initializing it with user-supplied values.
+  Node *rhs = create_lvar_init(init, var->ty, &desg, tok);
+
+  // A scalar with an initializer is fully initialized by it.
+  if (init->expr && var->ty->kind != TY_ARRAY &&
+      var->ty->kind != TY_STRUCT && var->ty->kind != TY_UNION)
+    return rhs;
+
   Node *lhs = new_node(ND_MEMZERO, tok);
   lhs->var = var;
-
-  Node *rhs = create_lvar_init(init, var->ty, &desg, tok);
   return new_binary(ND_COMMA, lhs, rhs, tok);
 }
 
-static uint64_t read_buf(char *buf, int sz) {
-  if (sz == 1)
-    return *buf;
-  if (sz == 2)
-    return *(uint16_t *)buf;
-  if (sz == 4)
-    return *(uint32_t *)buf;
-  if (sz == 8)
-    return *(uint64_t *)buf;
-  unreachable();
+// Global initializer images are arrays of 36-bit words, one per unit
+// of sizeof. Every scalar occupies exactly one word.
+static uint64_t read_buf(uint64_t *buf, int sz) {
+  if (sz != 1)
+    unreachable();
+  return *buf;
 }
 
-static void write_buf(char *buf, uint64_t val, int sz) {
-  if (sz == 1)
-    *buf = val;
-  else if (sz == 2)
-    *(uint16_t *)buf = val;
-  else if (sz == 4)
-    *(uint32_t *)buf = val;
-  else if (sz == 8)
-    *(uint64_t *)buf = val;
-  else
+static void write_buf(uint64_t *buf, uint64_t val, int sz) {
+  if (sz != 1)
     unreachable();
+  *buf = val & WORD_MASK;
 }
 
 static Relocation *
-write_gvar_data(Relocation *cur, Initializer *init, Type *ty, char *buf, int offset) {
+write_gvar_data(Relocation *cur, Initializer *init, Type *ty, uint64_t *buf, int offset) {
   if (ty->kind == TY_ARRAY) {
     int sz = ty->base->size;
     for (int i = 0; i < ty->array_len; i++)
@@ -1429,7 +1418,7 @@ write_gvar_data(Relocation *cur, Initializer *init, Type *ty, char *buf, int off
         if (!expr)
           break;
 
-        char *loc = buf + offset + mem->offset;
+        uint64_t *loc = buf + offset + mem->offset;
         uint64_t oldval = read_buf(loc, mem->ty->size);
         uint64_t newval = eval(expr);
         uint64_t mask = (1L << mem->bit_width) - 1;
@@ -1453,15 +1442,8 @@ write_gvar_data(Relocation *cur, Initializer *init, Type *ty, char *buf, int off
   if (!init->expr)
     return cur;
 
-  if (ty->kind == TY_FLOAT) {
-    *(float *)(buf + offset) = eval_double(init->expr);
-    return cur;
-  }
-
-  if (ty->kind == TY_DOUBLE) {
-    *(double *)(buf + offset) = eval_double(init->expr);
-    return cur;
-  }
+  if (is_flonum(ty))
+    error_tok(init->expr->tok, "floating-point is not supported on the ACR-7000");
 
   char **label = NULL;
   uint64_t val = eval2(init->expr, &label);
@@ -1487,7 +1469,7 @@ static void gvar_initializer(Token **rest, Token *tok, Obj *var) {
   Initializer *init = initializer(rest, tok, var->ty, &var->ty);
 
   Relocation head = {};
-  char *buf = calloc(1, var->ty->size);
+  uint64_t *buf = calloc(var->ty->size, sizeof(uint64_t));
   write_gvar_data(&head, init, var->ty, buf, 0);
   var->init_data = buf;
   var->rel = head.next;
@@ -1598,8 +1580,8 @@ static Node *stmt(Token **rest, Token *tok) {
       error_tok(tok, "stray case");
 
     Node *node = new_node(ND_CASE, tok);
-    int begin = const_expr(&tok, tok->next);
-    int end;
+    int64_t begin = const_expr(&tok, tok->next);
+    int64_t end;
 
     if (equal(tok, "...")) {
       // [GNU] Case ranges, e.g. "case 1 ... 5:"
@@ -1835,7 +1817,23 @@ static int64_t eval(Node *node) {
 // is a pointer to a global variable and n is a postiive/negative
 // number. The latter form is accepted only as an initialization
 // expression for a global variable.
+static int64_t eval2_raw(Node *node, char ***label);
+
+// Reduce a compile-time value to what a 36-bit word of the node's type
+// would hold. Values with an unresolved label are addresses plus an
+// addend and are left alone.
 static int64_t eval2(Node *node, char ***label) {
+  int64_t val = eval2_raw(node, label);
+  if ((label && *label) || is_flonum(node->ty))
+    return val;
+  if (node->ty->kind == TY_BOOL)
+    return val != 0;
+  if (is_integer(node->ty) || node->ty->kind == TY_PTR)
+    return wrap_word(val, node->ty->is_unsigned);
+  return val;
+}
+
+static int64_t eval2_raw(Node *node, char ***label) {
   add_type(node);
 
   if (is_flonum(node->ty))
@@ -1849,12 +1847,16 @@ static int64_t eval2(Node *node, char ***label) {
   case ND_MUL:
     return eval(node->lhs) * eval(node->rhs);
   case ND_DIV:
+    if (eval(node->rhs) == 0)
+      error_tok(node->rhs->tok, "division by zero in constant expression");
     if (node->ty->is_unsigned)
       return (uint64_t)eval(node->lhs) / eval(node->rhs);
     return eval(node->lhs) / eval(node->rhs);
   case ND_NEG:
     return -eval(node->lhs);
   case ND_MOD:
+    if (eval(node->rhs) == 0)
+      error_tok(node->rhs->tok, "division by zero in constant expression");
     if (node->ty->is_unsigned)
       return (uint64_t)eval(node->lhs) % eval(node->rhs);
     return eval(node->lhs) % eval(node->rhs);
@@ -1867,7 +1869,7 @@ static int64_t eval2(Node *node, char ***label) {
   case ND_SHL:
     return eval(node->lhs) << eval(node->rhs);
   case ND_SHR:
-    if (node->ty->is_unsigned && node->ty->size == 8)
+    if (node->ty->is_unsigned)
       return (uint64_t)eval(node->lhs) >> eval(node->rhs);
     return eval(node->lhs) >> eval(node->rhs);
   case ND_EQ:
@@ -1896,13 +1898,12 @@ static int64_t eval2(Node *node, char ***label) {
     return eval(node->lhs) || eval(node->rhs);
   case ND_CAST: {
     int64_t val = eval2(node->lhs, label);
-    if (is_integer(node->ty)) {
-      switch (node->ty->size) {
-      case 1: return node->ty->is_unsigned ? (uint8_t)val : (int8_t)val;
-      case 2: return node->ty->is_unsigned ? (uint16_t)val : (int16_t)val;
-      case 4: return node->ty->is_unsigned ? (uint32_t)val : (int32_t)val;
-      }
-    }
+    if (label && *label)
+      return val;
+    if (node->ty->kind == TY_BOOL)
+      return val != 0;
+    if (is_integer(node->ty) || node->ty->kind == TY_PTR)
+      return wrap_word(val, node->ty->is_unsigned);
     return val;
   }
   case ND_ADDR:
@@ -2030,10 +2031,29 @@ static double eval_double(Node *node) {
 // However, if a given expression is of form `A.x op= C`, the input is
 // converted to `tmp = &A, (*tmp).x = (*tmp).x op C` to handle assignments
 // to bitfields.
+// Returns true if evaluating `node` twice is equivalent to evaluating
+// it once (no side effects, no volatile access).
+static bool is_pure_lvalue(Node *node) {
+  switch (node->kind) {
+  case ND_VAR:
+    return true;
+  case ND_MEMBER:
+  case ND_DEREF:
+    return is_pure_lvalue(node->lhs);
+  }
+  return false;
+}
+
 static Node *to_assign(Node *binary) {
   add_type(binary->lhs);
   add_type(binary->rhs);
   Token *tok = binary->tok;
+
+  // Convert `A op= B` to `A = A op B` if A can simply be evaluated twice.
+  if (!binary->lhs->ty->is_atomic && is_pure_lvalue(binary->lhs))
+    return new_binary(ND_ASSIGN, binary->lhs,
+                      new_binary(binary->kind, binary->lhs, binary->rhs, tok),
+                      tok);
 
   // Convert `A.x op= C` to `tmp = &A, (*tmp).x = (*tmp).x op C`.
   if (binary->lhs->kind == ND_MEMBER) {
@@ -2577,6 +2597,8 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
       if (consume(&tok, tok, ":")) {
         mem->is_bitfield = true;
         mem->bit_width = const_expr(&tok, tok);
+        if (mem->bit_width < 0 || mem->bit_width > mem->ty->size * WORD_BITS)
+          error_tok(tok, "invalid bit-field width");
       }
 
       cur = cur->next = mem;
@@ -2689,27 +2711,27 @@ static Type *struct_decl(Token **rest, Token *tok) {
     if (mem->is_bitfield && mem->bit_width == 0) {
       // Zero-width anonymous bitfield has a special meaning.
       // It affects only alignment.
-      bits = align_to(bits, mem->ty->size * 8);
+      bits = align_to(bits, mem->ty->size * WORD_BITS);
     } else if (mem->is_bitfield) {
       int sz = mem->ty->size;
-      if (bits / (sz * 8) != (bits + mem->bit_width - 1) / (sz * 8))
-        bits = align_to(bits, sz * 8);
+      if (bits / (sz * WORD_BITS) != (bits + mem->bit_width - 1) / (sz * WORD_BITS))
+        bits = align_to(bits, sz * WORD_BITS);
 
-      mem->offset = align_down(bits / 8, sz);
-      mem->bit_offset = bits % (sz * 8);
+      mem->offset = align_down(bits / WORD_BITS, sz);
+      mem->bit_offset = bits % (sz * WORD_BITS);
       bits += mem->bit_width;
     } else {
       if (!ty->is_packed)
-        bits = align_to(bits, mem->align * 8);
-      mem->offset = bits / 8;
-      bits += mem->ty->size * 8;
+        bits = align_to(bits, mem->align * WORD_BITS);
+      mem->offset = bits / WORD_BITS;
+      bits += mem->ty->size * WORD_BITS;
     }
 
     if (!ty->is_packed && ty->align < mem->align)
       ty->align = mem->align;
   }
 
-  ty->size = align_to(bits, ty->align * 8) / 8;
+  ty->size = align_to(bits, ty->align * WORD_BITS) / WORD_BITS;
   return ty;
 }
 
@@ -2917,6 +2939,9 @@ static Node *funcall(Token **rest, Token *tok, Node *fn) {
   node->func_ty = ty;
   node->ty = ty->return_ty;
   node->args = head.next;
+
+  if (fn->kind == ND_VAR && fn->var == builtin_alloca)
+    current_fn->uses_alloca = true;
 
   // If a function returns a struct, it is caller's responsibility
   // to allocate a space for the return value.
@@ -3233,13 +3258,13 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
   // A buffer for a struct/union return value is passed
   // as the hidden first parameter.
   Type *rty = ty->return_ty;
-  if ((rty->kind == TY_STRUCT || rty->kind == TY_UNION) && rty->size > 16)
+  if (rty->kind == TY_STRUCT || rty->kind == TY_UNION)
     new_lvar("", pointer_to(rty));
 
   fn->params = locals;
 
-  if (ty->is_variadic)
-    fn->va_area = new_lvar("__va_area__", array_of(ty_char, 136));
+  // Variadic arguments simply follow the named ones on the stack, so
+  // <stdarg.h> needs no register save area.
   fn->alloca_bottom = new_lvar("__alloca_size__", pointer_to(ty_char));
 
   tok = skip(tok, "{");
@@ -3279,6 +3304,8 @@ static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
     var->is_tls = attr->is_tls;
     if (attr->align)
       var->align = attr->align;
+    if (attr->align > 1)
+      warn_tok(ty->name, "alignment of variables is not supported on the ACR-7000; ignored");
 
     if (equal(tok, "="))
       gvar_initializer(&tok, tok->next, var);

@@ -18,6 +18,16 @@
 #include <time.h>
 #include <unistd.h>
 
+// ACR-7000 target: a 36-bit word-addressed machine. Every scalar type
+// (char, short, int, long, pointers, ...) occupies exactly one word, so
+// sizeof(int) == 1 and CHAR_BIT == 36.
+#define WORD_BITS 36
+#define WORD_MASK ((1ULL << WORD_BITS) - 1)
+
+// Zero-filled objects at least this many words long are placed after
+// the rest of the program.
+#define BIG_BSS 1024
+
 #define MAX(x, y) ((x) < (y) ? (y) : (x))
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
@@ -117,6 +127,7 @@ void init_macros(void);
 void define_macro(char *name, char *buf);
 void undef_macro(char *name);
 Token *preprocess(Token *tok);
+int host_char_size(Type *basety);
 
 //
 // parse.c
@@ -143,7 +154,7 @@ struct Obj {
   // Global variable
   bool is_tentative;
   bool is_tls;
-  char *init_data;
+  uint64_t *init_data; // one 36-bit word per element of ty->size
   Relocation *rel;
 
   // Function
@@ -154,6 +165,7 @@ struct Obj {
   Obj *va_area;
   Obj *alloca_bottom;
   int stack_size;
+  bool uses_alloca;
 
   // Static inline function
   bool is_live;
@@ -410,6 +422,9 @@ void add_type(Node *node);
 
 void codegen(Obj *prog, FILE *out);
 int align_to(int n, int align);
+int64_t wrap_word(int64_t val, bool is_unsigned);
+char *acr_unit_id(char *path);
+char *acr_global_label(char *name);
 
 //
 // unicode.c
@@ -450,8 +465,9 @@ void hashmap_test(void);
 //
 
 bool file_exists(char *path);
+void acr_link(StringArray *inputs, char *output, char *argv0,
+              char *libc, uint64_t stack_top, char *keep_asm);
 
 extern StringArray include_paths;
-extern bool opt_fpic;
 extern bool opt_fcommon;
 extern char *base_file;

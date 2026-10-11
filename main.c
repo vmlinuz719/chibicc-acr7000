@@ -6,7 +6,6 @@ typedef enum {
 
 StringArray include_paths;
 bool opt_fcommon = true;
-bool opt_fpic;
 
 static FileType opt_x;
 static StringArray opt_include;
@@ -19,14 +18,15 @@ static bool opt_S;
 static bool opt_c;
 static bool opt_cc1;
 static bool opt_hash_hash_hash;
-static bool opt_static;
-static bool opt_shared;
+static bool opt_nostdlib;
+static bool opt_save_temps;
+static uint64_t opt_stack_top = 262144;
 static char *opt_MF;
 static char *opt_MT;
 static char *opt_o;
 
-static StringArray ld_extra_args;
 static StringArray std_include_paths;
+static char *argv0;
 
 char *base_file;
 static char *output_file;
@@ -35,13 +35,21 @@ static StringArray input_paths;
 static StringArray tmpfiles;
 
 static void usage(int status) {
-  fprintf(stderr, "chibicc [ -o <path> ] <file>\n");
+  fprintf(stderr,
+          "chibicc for the ACR-7000\n"
+          "usage: chibicc [ -o <path> ] [ -S | -c | -E ] <file>...\n"
+          "  -S              compile to ACR-7000 assembly (.s)\n"
+          "  -c              compile to an object file (.o, assembly text)\n"
+          "  (default)       compile and link into a paper tape image (a.out)\n"
+          "  -nostdlib       do not link the C library\n"
+          "  -save-temps     keep the linked assembly as <output>.s\n"
+          "  -mstack-top=<n> initial stack pointer (default 262144)\n");
   exit(status);
 }
 
 static bool take_arg(char *arg) {
   char *x[] = {
-    "-o", "-I", "-idirafter", "-include", "-x", "-MF", "-MT", "-Xlinker",
+    "-o", "-I", "-idirafter", "-include", "-x", "-MF", "-MT", "-Xlinker", "-L",
   };
 
   for (int i = 0; i < sizeof(x) / sizeof(*x); i++)
@@ -53,12 +61,12 @@ static bool take_arg(char *arg) {
 static void add_default_include_paths(char *argv0) {
   // We expect that chibicc-specific include files are installed
   // to ./include relative to argv[0].
-  strarray_push(&include_paths, format("%s/include", dirname(strdup(argv0))));
+  char *dir = dirname(strdup(argv0));
+  strarray_push(&include_paths, format("%s/include", dir));
 
-  // Add standard include paths.
-  strarray_push(&include_paths, "/usr/local/include");
-  strarray_push(&include_paths, "/usr/include/x86_64-linux-gnu");
-  strarray_push(&include_paths, "/usr/include");
+  // The host's system headers describe the host; ACR-7000 programs get
+  // the headers of chibicc's own small C library instead.
+  strarray_push(&include_paths, format("%s/acr/include", dir));
 
   // Keep a copy of the standard include paths for -MMD option.
   for (int i = 0; i < include_paths.len; i++)
@@ -120,6 +128,7 @@ static void parse_args(int argc, char **argv) {
         usage(1);
 
   StringArray idirafter = {};
+  argv0 = argv[0];
 
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "-###")) {
@@ -210,18 +219,32 @@ static void parse_args(int argc, char **argv) {
       continue;
     }
 
-    if (!strncmp(argv[i], "-l", 2) || !strncmp(argv[i], "-Wl,", 4)) {
-      strarray_push(&input_paths, argv[i]);
+    // The C library is always linked; there are no other libraries.
+    if (!strcmp(argv[i], "-lc"))
+      continue;
+
+    if (!strncmp(argv[i], "-l", 2))
+      error("%s: the ACR-7000 has no libraries other than the built-in C library",
+            argv[i]);
+
+    if (!strncmp(argv[i], "-Wl,", 4) || !strcmp(argv[i], "-Xlinker"))
+      error("%s: linker options are not supported on the ACR-7000", argv[i]);
+
+    if (!strcmp(argv[i], "-s"))
+      continue;
+
+    if (!strcmp(argv[i], "-nostdlib")) {
+      opt_nostdlib = true;
       continue;
     }
 
-    if (!strcmp(argv[i], "-Xlinker")) {
-      strarray_push(&ld_extra_args, argv[++i]);
+    if (!strcmp(argv[i], "-save-temps")) {
+      opt_save_temps = true;
       continue;
     }
 
-    if (!strcmp(argv[i], "-s")) {
-      strarray_push(&ld_extra_args, "-s");
+    if (!strncmp(argv[i], "-mstack-top=", 12)) {
+      opt_stack_top = strtoull(argv[i] + 12, NULL, 0);
       continue;
     }
 
@@ -266,10 +289,15 @@ static void parse_args(int argc, char **argv) {
       continue;
     }
 
-    if (!strcmp(argv[i], "-fpic") || !strcmp(argv[i], "-fPIC")) {
-      opt_fpic = true;
+    if (!strcmp(argv[i], "-fpic") || !strcmp(argv[i], "-fPIC") ||
+        !strcmp(argv[i], "-fpie") || !strcmp(argv[i], "-fPIE") ||
+        !strcmp(argv[i], "-shared") || !strcmp(argv[i], "-rdynamic"))
+      error("%s: dynamic linking is not supported on the ACR-7000", argv[i]);
+
+    if (!strcmp(argv[i], "-fno-pic") || !strcmp(argv[i], "-fno-PIC") ||
+        !strcmp(argv[i], "-fno-pie") || !strcmp(argv[i], "-fno-PIE") ||
+        !strcmp(argv[i], "-no-pie"))
       continue;
-    }
 
     if (!strcmp(argv[i], "-cc1-input")) {
       base_file = argv[++i];
@@ -286,29 +314,16 @@ static void parse_args(int argc, char **argv) {
       continue;
     }
 
-    if (!strcmp(argv[i], "-static")) {
-      opt_static = true;
-      strarray_push(&ld_extra_args, "-static");
+    if (!strcmp(argv[i], "-static"))
       continue;
-    }
-
-    if (!strcmp(argv[i], "-shared")) {
-      opt_shared = true;
-      strarray_push(&ld_extra_args, "-shared");
-      continue;
-    }
 
     if (!strcmp(argv[i], "-L")) {
-      strarray_push(&ld_extra_args, "-L");
-      strarray_push(&ld_extra_args, argv[++i]);
+      i++;
       continue;
     }
 
-    if (!strncmp(argv[i], "-L", 2)) {
-      strarray_push(&ld_extra_args, "-L");
-      strarray_push(&ld_extra_args, argv[i] + 2);
+    if (!strncmp(argv[i], "-L", 2))
       continue;
-    }
 
     if (!strcmp(argv[i], "-hashmap-test")) {
       hashmap_test();
@@ -407,6 +422,8 @@ static void run_subprocess(char **argv) {
   // Wait for the child process to finish.
   int status;
   while (wait(&status) > 0);
+  if (WIFSIGNALED(status))
+    fprintf(stderr, "%s: terminated by signal %d\n", argv[0], WTERMSIG(status));
   if (status != 0)
     exit(1);
 }
@@ -567,116 +584,31 @@ static void cc1(void) {
   fclose(out);
 }
 
-static void assemble(char *input, char *output) {
-  char *cmd[] = {"as", "-c", input, "-o", output, NULL};
-  run_subprocess(cmd);
-}
-
-static char *find_file(char *pattern) {
-  char *path = NULL;
-  glob_t buf = {};
-  glob(pattern, 0, NULL, &buf);
-  if (buf.gl_pathc > 0)
-    path = strdup(buf.gl_pathv[buf.gl_pathc - 1]);
-  globfree(&buf);
-  return path;
-}
-
 // Returns true if a given file exists.
 bool file_exists(char *path) {
   struct stat st;
   return !stat(path, &st);
 }
 
-static char *find_libpath(void) {
-  if (file_exists("/usr/lib/x86_64-linux-gnu/crti.o"))
-    return "/usr/lib/x86_64-linux-gnu";
-  if (file_exists("/usr/lib64/crti.o"))
-    return "/usr/lib64";
-  error("library path is not found");
+// "Assembling" for the ACR-7000 just means keeping the assembly text:
+// object files are assembly that the linker concatenates (see acrlink.c).
+static void copy_file(char *input, char *output) {
+  FILE *in = strcmp(input, "-") ? fopen(input, "r") : stdin;
+  if (!in)
+    error("cannot open %s: %s", input, strerror(errno));
+  FILE *out = open_file(output);
+  char buf[4096];
+  size_t n;
+  while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+    fwrite(buf, 1, n, out);
+  if (in != stdin)
+    fclose(in);
+  if (out != stdout)
+    fclose(out);
 }
 
-static char *find_gcc_libpath(void) {
-  char *paths[] = {
-    "/usr/lib/gcc/x86_64-linux-gnu/*/crtbegin.o",
-    "/usr/lib/gcc/x86_64-pc-linux-gnu/*/crtbegin.o", // For Gentoo
-    "/usr/lib/gcc/x86_64-redhat-linux/*/crtbegin.o", // For Fedora
-  };
-
-  for (int i = 0; i < sizeof(paths) / sizeof(*paths); i++) {
-    char *path = find_file(paths[i]);
-    if (path)
-      return dirname(path);
-  }
-
-  error("gcc library path is not found");
-}
-
-static void run_linker(StringArray *inputs, char *output) {
-  StringArray arr = {};
-
-  strarray_push(&arr, "ld");
-  strarray_push(&arr, "-o");
-  strarray_push(&arr, output);
-  strarray_push(&arr, "-m");
-  strarray_push(&arr, "elf_x86_64");
-
-  char *libpath = find_libpath();
-  char *gcc_libpath = find_gcc_libpath();
-
-  if (opt_shared) {
-    strarray_push(&arr, format("%s/crti.o", libpath));
-    strarray_push(&arr, format("%s/crtbeginS.o", gcc_libpath));
-  } else {
-    strarray_push(&arr, format("%s/crt1.o", libpath));
-    strarray_push(&arr, format("%s/crti.o", libpath));
-    strarray_push(&arr, format("%s/crtbegin.o", gcc_libpath));
-  }
-
-  strarray_push(&arr, format("-L%s", gcc_libpath));
-  strarray_push(&arr, "-L/usr/lib/x86_64-linux-gnu");
-  strarray_push(&arr, "-L/usr/lib64");
-  strarray_push(&arr, "-L/lib64");
-  strarray_push(&arr, "-L/usr/lib/x86_64-linux-gnu");
-  strarray_push(&arr, "-L/usr/lib/x86_64-pc-linux-gnu");
-  strarray_push(&arr, "-L/usr/lib/x86_64-redhat-linux");
-  strarray_push(&arr, "-L/usr/lib");
-  strarray_push(&arr, "-L/lib");
-
-  if (!opt_static) {
-    strarray_push(&arr, "-dynamic-linker");
-    strarray_push(&arr, "/lib64/ld-linux-x86-64.so.2");
-  }
-
-  for (int i = 0; i < ld_extra_args.len; i++)
-    strarray_push(&arr, ld_extra_args.data[i]);
-
-  for (int i = 0; i < inputs->len; i++)
-    strarray_push(&arr, inputs->data[i]);
-
-  if (opt_static) {
-    strarray_push(&arr, "--start-group");
-    strarray_push(&arr, "-lgcc");
-    strarray_push(&arr, "-lgcc_eh");
-    strarray_push(&arr, "-lc");
-    strarray_push(&arr, "--end-group");
-  } else {
-    strarray_push(&arr, "-lc");
-    strarray_push(&arr, "-lgcc");
-    strarray_push(&arr, "--as-needed");
-    strarray_push(&arr, "-lgcc_s");
-    strarray_push(&arr, "--no-as-needed");
-  }
-
-  if (opt_shared)
-    strarray_push(&arr, format("%s/crtendS.o", gcc_libpath));
-  else
-    strarray_push(&arr, format("%s/crtend.o", gcc_libpath));
-
-  strarray_push(&arr, format("%s/crtn.o", libpath));
-  strarray_push(&arr, NULL);
-
-  run_subprocess(arr.data);
+static char *libc_path(void) {
+  return format("%s/acr/libc.o", dirname(strdup(argv0)));
 }
 
 static FileType get_file_type(char *filename) {
@@ -685,13 +617,13 @@ static FileType get_file_type(char *filename) {
 
   if (endswith(filename, ".a"))
     return FILE_AR;
-  if (endswith(filename, ".so"))
+  if (endswith(filename, ".so") || strstr(filename, ".so."))
     return FILE_DSO;
   if (endswith(filename, ".o"))
     return FILE_OBJ;
   if (endswith(filename, ".c"))
     return FILE_C;
-  if (endswith(filename, ".s"))
+  if (endswith(filename, ".s") || endswith(filename, ".a700"))
     return FILE_ASM;
 
   error("<command line>: unknown file extension: %s", filename);
@@ -716,21 +648,6 @@ int main(int argc, char **argv) {
   for (int i = 0; i < input_paths.len; i++) {
     char *input = input_paths.data[i];
 
-    if (!strncmp(input, "-l", 2)) {
-      strarray_push(&ld_args, input);
-      continue;
-    }
-
-    if (!strncmp(input, "-Wl,", 4)) {
-      char *s = strdup(input + 4);
-      char *arg = strtok(s, ",");
-      while (arg) {
-        strarray_push(&ld_args, arg);
-        arg = strtok(NULL, ",");
-      }
-      continue;
-    }
-
     char *output;
     if (opt_o)
       output = opt_o;
@@ -741,16 +658,23 @@ int main(int argc, char **argv) {
 
     FileType type = get_file_type(input);
 
-    // Handle .o or .a
-    if (type == FILE_OBJ || type == FILE_AR || type == FILE_DSO) {
+    if (type == FILE_DSO)
+      error("%s: dynamic linking is not supported on the ACR-7000", input);
+    if (type == FILE_AR)
+      error("%s: archives are not supported on the ACR-7000", input);
+
+    // Handle .o
+    if (type == FILE_OBJ) {
       strarray_push(&ld_args, input);
       continue;
     }
 
     // Handle .s
     if (type == FILE_ASM) {
-      if (!opt_S)
-        assemble(input, output);
+      if (opt_c)
+        copy_file(input, output);
+      else if (!opt_S)
+        strarray_push(&ld_args, input);
       continue;
     }
 
@@ -770,22 +694,21 @@ int main(int argc, char **argv) {
 
     // Compile and assemble
     if (opt_c) {
-      char *tmp = create_tmpfile();
-      run_cc1(argc, argv, input, tmp);
-      assemble(tmp, output);
+      run_cc1(argc, argv, input, output);
       continue;
     }
 
     // Compile, assemble and link
-    char *tmp1 = create_tmpfile();
-    char *tmp2 = create_tmpfile();
-    run_cc1(argc, argv, input, tmp1);
-    assemble(tmp1, tmp2);
-    strarray_push(&ld_args, tmp2);
+    char *tmp = create_tmpfile();
+    run_cc1(argc, argv, input, tmp);
+    strarray_push(&ld_args, tmp);
     continue;
   }
 
-  if (ld_args.len > 0)
-    run_linker(&ld_args, opt_o ? opt_o : "a.out");
+  if (ld_args.len > 0) {
+    char *out = opt_o ? opt_o : "a.out";
+    acr_link(&ld_args, out, argv[0], opt_nostdlib ? NULL : libc_path(),
+             opt_stack_top, opt_save_temps ? format("%s.s", out) : NULL);
+  }
   return 0;
 }

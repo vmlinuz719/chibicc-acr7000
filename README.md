@@ -1,3 +1,6 @@
+> **This tree is a port of chibicc to the ACR-7000** (the 36-bit machine in
+> `../acr7000`). See [ACR7000.md](ACR7000.md) for how to build and use it.
+
 # chibicc: A Small C Compiler
 
 (The old master has moved to

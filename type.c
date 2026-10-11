@@ -1,21 +1,24 @@
 #include "chibicc.h"
 
+// On the ACR-7000 every scalar type is a single 36-bit word. Floating
+// point types keep plausible sizes (one word for float, two for double)
+// so that declarations parse, but codegen rejects any attempt to use them.
 Type *ty_void = &(Type){TY_VOID, 1, 1};
 Type *ty_bool = &(Type){TY_BOOL, 1, 1};
 
 Type *ty_char = &(Type){TY_CHAR, 1, 1};
-Type *ty_short = &(Type){TY_SHORT, 2, 2};
-Type *ty_int = &(Type){TY_INT, 4, 4};
-Type *ty_long = &(Type){TY_LONG, 8, 8};
+Type *ty_short = &(Type){TY_SHORT, 1, 1};
+Type *ty_int = &(Type){TY_INT, 1, 1};
+Type *ty_long = &(Type){TY_LONG, 1, 1};
 
 Type *ty_uchar = &(Type){TY_CHAR, 1, 1, true};
-Type *ty_ushort = &(Type){TY_SHORT, 2, 2, true};
-Type *ty_uint = &(Type){TY_INT, 4, 4, true};
-Type *ty_ulong = &(Type){TY_LONG, 8, 8, true};
+Type *ty_ushort = &(Type){TY_SHORT, 1, 1, true};
+Type *ty_uint = &(Type){TY_INT, 1, 1, true};
+Type *ty_ulong = &(Type){TY_LONG, 1, 1, true};
 
-Type *ty_float = &(Type){TY_FLOAT, 4, 4};
-Type *ty_double = &(Type){TY_DOUBLE, 8, 8};
-Type *ty_ldouble = &(Type){TY_LDOUBLE, 16, 16};
+Type *ty_float = &(Type){TY_FLOAT, 1, 1};
+Type *ty_double = &(Type){TY_DOUBLE, 2, 1};
+Type *ty_ldouble = &(Type){TY_LDOUBLE, 2, 1};
 
 static Type *new_type(TypeKind kind, int size, int align) {
   Type *ty = calloc(1, sizeof(Type));
@@ -95,7 +98,7 @@ Type *copy_type(Type *ty) {
 }
 
 Type *pointer_to(Type *base) {
-  Type *ty = new_type(TY_PTR, 8, 8);
+  Type *ty = new_type(TY_PTR, 1, 1);
   ty->base = base;
   ty->is_unsigned = true;
   return ty;
@@ -117,18 +120,39 @@ Type *array_of(Type *base, int len) {
 }
 
 Type *vla_of(Type *base, Node *len) {
-  Type *ty = new_type(TY_VLA, 8, 8);
+  Type *ty = new_type(TY_VLA, 1, 1);
   ty->base = base;
   ty->vla_len = len;
   return ty;
 }
 
 Type *enum_type(void) {
-  return new_type(TY_ENUM, 4, 4);
+  return new_type(TY_ENUM, 1, 1);
 }
 
 Type *struct_type(void) {
   return new_type(TY_STRUCT, 0, 1);
+}
+
+static int int_rank(Type *ty) {
+  switch (ty->kind) {
+  case TY_BOOL: return 0;
+  case TY_CHAR: return 1;
+  case TY_SHORT: return 2;
+  case TY_LONG: return 4;
+  default: return 3; // int, enum
+  }
+}
+
+// Integer promotion. Since char and short are as wide as int, an
+// unsigned char or unsigned short value may not fit in an int and is
+// therefore promoted to unsigned int.
+static Type *int_promote(Type *ty) {
+  if (int_rank(ty) >= 3 && ty->kind != TY_ENUM)
+    return ty;
+  if (ty->kind == TY_ENUM || ty->kind == TY_BOOL || !ty->is_unsigned)
+    return ty_int;
+  return ty_uint;
 }
 
 static Type *get_common_type(Type *ty1, Type *ty2) {
@@ -147,17 +171,22 @@ static Type *get_common_type(Type *ty1, Type *ty2) {
   if (ty1->kind == TY_FLOAT || ty2->kind == TY_FLOAT)
     return ty_float;
 
-  if (ty1->size < 4)
-    ty1 = ty_int;
-  if (ty2->size < 4)
-    ty2 = ty_int;
+  // All integer types have the same width, so the usual arithmetic
+  // conversions are decided purely by conversion rank and signedness.
+  ty1 = int_promote(ty1);
+  ty2 = int_promote(ty2);
 
-  if (ty1->size != ty2->size)
-    return (ty1->size < ty2->size) ? ty2 : ty1;
+  if (ty1->is_unsigned == ty2->is_unsigned)
+    return (int_rank(ty1) >= int_rank(ty2)) ? ty1 : ty2;
 
-  if (ty2->is_unsigned)
-    return ty2;
-  return ty1;
+  Type *uty = ty1->is_unsigned ? ty1 : ty2;
+  Type *sty = ty1->is_unsigned ? ty2 : ty1;
+  if (int_rank(uty) >= int_rank(sty))
+    return uty;
+
+  // The signed type has higher rank but cannot represent every value of
+  // the (equally wide) unsigned type: use its unsigned counterpart.
+  return (sty->kind == TY_LONG) ? ty_ulong : ty_uint;
 }
 
 // For many binary operators, we implicitly promote operands so that

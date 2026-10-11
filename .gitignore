@@ -8,3 +8,6 @@
 /chibicc
 /test/*.exe
 /stage2
+/asm2
+/acrrun
+**/*.ppt

@@ -1,0 +1,31 @@
+#ifndef __LIMITS_H
+#define __LIMITS_H
+
+// ACR-7000: every integer type is one 36-bit word.
+
+#define CHAR_BIT 36
+#define MB_LEN_MAX 4
+
+#define SCHAR_MAX 34359738367
+#define SCHAR_MIN (-SCHAR_MAX - 1)
+#define UCHAR_MAX 68719476735U
+#define CHAR_MAX SCHAR_MAX
+#define CHAR_MIN SCHAR_MIN
+
+#define SHRT_MAX 34359738367
+#define SHRT_MIN (-SHRT_MAX - 1)
+#define USHRT_MAX 68719476735U
+
+#define INT_MAX 34359738367
+#define INT_MIN (-INT_MAX - 1)
+#define UINT_MAX 68719476735U
+
+#define LONG_MAX 34359738367L
+#define LONG_MIN (-LONG_MAX - 1L)
+#define ULONG_MAX 68719476735UL
+
+#define LLONG_MAX 34359738367LL
+#define LLONG_MIN (-LLONG_MAX - 1LL)
+#define ULLONG_MAX 68719476735ULL
+
+#endif

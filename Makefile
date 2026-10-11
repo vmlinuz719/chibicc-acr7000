@@ -1,50 +1,57 @@
 CFLAGS=-std=c11 -g -fno-common -Wall -Wno-switch
 
+# chibicc for the ACR-7000. The compiler itself is built for the host;
+# it generates code for the ACR-7000 and uses the emulator project's
+# assembler (asm2) to produce paper tape images.
+ACR7000=../acr7000
+
 SRCS=$(wildcard *.c)
 OBJS=$(SRCS:.c=.o)
 
-TEST_SRCS=$(wildcard test/*.c)
-TESTS=$(TEST_SRCS:.c=.exe)
-
-# Stage 1
+all: chibicc asm2 acrrun acr/libc.o
 
 chibicc: $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(OBJS): chibicc.h
 
-test/%.exe: chibicc test/%.c
-	./chibicc -Iinclude -Itest -c -o test/$*.o test/$*.c
-	$(CC) -pthread -o $@ test/$*.o -xc test/common
+# The ACR-7000 assembler, built from the emulator's sources.
+asm2: $(ACR7000)/not_vibe_code/asm2.c
+	$(CC) -O2 -w -o $@ $<
 
-test: $(TESTS)
-	for i in $^; do echo $$i; ./$$i || exit 1; echo; done
-	test/driver.sh ./chibicc
+# Headless runner: the emulator core with a batch driver instead of the
+# interactive monitor (see acr/acrrun.c).
+ACRRUN_OBJS=acr/acrrun.o acr/acr7000-cpu.o acr/acr7000-fpu.o
 
-test-all: test test-stage2
+acrrun: $(ACRRUN_OBJS)
+	$(CC) -o $@ $^ -lpthread
 
-# Stage 2
+acr/acrrun.o: acr/acrrun.c
+	$(CC) -O2 -Wall -I$(ACR7000)/include -c -o $@ $<
 
-stage2/chibicc: $(OBJS:%=stage2/%)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+acr/acr7000-cpu.o: $(ACR7000)/cpu.c $(wildcard $(ACR7000)/include/*.h)
+	$(CC) -O2 -w -I$(ACR7000)/include -I$(ACR7000) -Dmain=acr7k_monitor_main -c -o $@ $<
 
-stage2/%.o: chibicc %.c
-	mkdir -p stage2/test
-	./chibicc -c -o $(@D)/$*.o $*.c
+acr/acr7000-fpu.o: $(ACR7000)/fpu.c
+	$(CC) -O2 -w -I$(ACR7000)/include -c -o $@ $<
 
-stage2/test/%.exe: stage2/chibicc test/%.c
-	mkdir -p stage2/test
-	./stage2/chibicc -Iinclude -Itest -c -o stage2/test/$*.o test/$*.c
-	$(CC) -pthread -o $@ stage2/test/$*.o -xc test/common
+# The C library, compiled by chibicc itself.
+acr/libc.o: chibicc acr/libc.c $(wildcard acr/include/*.h) $(wildcard include/*.h)
+	./chibicc -c -o $@ acr/libc.c
 
-test-stage2: $(TESTS:test/%=stage2/test/%)
-	for i in $^; do echo $$i; ./$$i || exit 1; echo; done
-	test/driver.sh ./stage2/chibicc
+# Run chibicc's test suite (adapted where needed, see acr/test) on the
+# emulator.
+test: all
+	acr/test/run.sh
+	acr/test/run.sh acr7000
+	acr/test/driver.sh ./chibicc
 
-# Misc.
+# Regenerate the adapted test files from test/*.c.
+test-adapt:
+	python3 acr/test/adapt.py
 
 clean:
-	rm -rf chibicc tmp* $(TESTS) test/*.s test/*.exe stage2
+	rm -rf chibicc asm2 acrrun tmp* $(ACRRUN_OBJS) acr/libc.o
 	find * -type f '(' -name '*~' -o -name '*.o' ')' -exec rm {} ';'
 
-.PHONY: test clean test-stage2
+.PHONY: all test test-adapt clean
