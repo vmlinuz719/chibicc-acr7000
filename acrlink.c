@@ -169,7 +169,23 @@ static void copy_unit(FILE *out, char *text) {
   }
 }
 
-static char *crt0(uint64_t stack_top) {
+// The startup module. `exit_fn` and `trap_fn` are the labels of exit()
+// and __acr_trap(), or NULL if the program has none (with -nostdlib), in
+// which case main's result or 128 + the exception number becomes the
+// halt code directly.
+static char *crt0(uint64_t stack_top, char *exit_fn, char *trap_fn) {
+  char *do_exit = exit_fn
+    ? format("            push        ac\n"
+             "            calls       %s\n", exit_fn)
+    : "";
+  char *do_trap = trap_fn
+    ? format("            ld          x1, 32                   ; interrupted PSW\n"
+             "            movmz       x1, x1, 9\n"
+             "            push        x1\n"
+             "            push        x0\n"
+             "            calls       %s\n", trap_fn)
+    : "            addi        x0, ac, 128\n";
+
   char *buf;
   size_t buflen;
   FILE *out = open_memstream(&buf, &buflen);
@@ -215,8 +231,7 @@ static char *crt0(uint64_t stack_top) {
     "            push        x0\n"
     "            calls       %s\n"
     "            addea       sp, 2\n"
-    "            push        ac\n"
-    "            calls       %s\n"
+    "%s"
     "            hlt\n"
     "            jmp         .-1\n"
     "\n"
@@ -227,11 +242,7 @@ static char *crt0(uint64_t stack_top) {
     "            ld          x0, $$xcw\n"
     "            movsrz      x0, x0, x0, 24\n"
     "            andi        x0, x0, 15\n"
-    "            ld          x1, 32                   ; interrupted PSW\n"
-    "            movmz       x1, x1, 9\n"
-    "            push        x1\n"
-    "            push        x0\n"
-    "            calls       %s\n"
+    "%s"
     "            hlt\n"
     "            jmp         .-1\n"
     "\n"
@@ -255,8 +266,7 @@ static char *crt0(uint64_t stack_top) {
     "$$s27:      dw          033000000000\n"
     "$$s18:      dw          022000000000\n"
     "$$s9:       dw          011000000000\n",
-    acr_global_label("main"), acr_global_label("exit"),
-    acr_global_label("__acr_trap"), (unsigned long)stack_top);
+    acr_global_label("main"), do_exit, do_trap, (unsigned long)stack_top);
 
   fclose(out);
   return buf;
@@ -634,7 +644,7 @@ void acr_link(StringArray *inputs, char *output, char *argv0,
   for (int i = 0; i < inputs->len; i++)
     strarray_push(&program, read_text(inputs->data[i]));
 
-  strarray_push(&texts, crt0(stack_top));
+  strarray_push(&texts, "");  // crt0, generated below
   strarray_push(&names, "<crt0>");
   if (libc) {
     if (!file_exists(libc))
@@ -651,8 +661,15 @@ void acr_link(StringArray *inputs, char *output, char *argv0,
     strarray_push(&names, inputs->data[i]);
   }
 
-  for (int i = 0; i < texts.len; i++)
+  for (int i = 1; i < texts.len; i++)
     scan(texts.data[i], names.data[i]);
+
+  // Without the C library, call exit() and __acr_trap() only if the
+  // program provides them.
+  char *exit_fn = acr_global_label("exit");
+  char *trap_fn = acr_global_label("__acr_trap");
+  texts.data[0] = crt0(stack_top, hashmap_get(&defs, exit_fn) ? exit_fn : NULL,
+                       hashmap_get(&defs, trap_fn) ? trap_fn : NULL);
 
   char *heap = acr_global_label("__heap_start");
   define(heap, "__heap_start", "<linker>");

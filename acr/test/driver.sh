@@ -319,4 +319,19 @@ $chibicc -o $tmp/foo $tmp/obj1.o $tmp/obj2.o && $run $tmp/foo
 [ "$?" = 5 ]
 check 'separate compilation'
 
+# Freestanding programs (-nostdlib): main's result or 128 + the exception
+# number is the halt code, unless the program provides exit/__acr_trap
+echo 'int main(void) { return 5; }' > $tmp/fs.c
+$chibicc -nostdlib -o $tmp/foo $tmp/fs.c && $run $tmp/foo
+[ "$?" = 5 ]
+check '-nostdlib'
+echo 'int zero; int main(void) { return 10 / zero; }' > $tmp/fs.c
+$chibicc -nostdlib -o $tmp/foo $tmp/fs.c && $run $tmp/foo
+[ "$?" = 136 ]
+check '-nostdlib exception'
+printf 'void exit(int s) { asm("  ld ac, 3(ap)\\n  addi ac, ac, 1\\n  hlt"); }\nint main(void) { return 5; }\n' > $tmp/fs.c
+$chibicc -nostdlib -o $tmp/foo $tmp/fs.c && $run $tmp/foo
+[ "$?" = 6 ]
+check '-nostdlib with exit'
+
 echo OK
