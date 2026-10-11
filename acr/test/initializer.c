@@ -122,7 +122,7 @@ int main() {
   ASSERT(0, g13[0].b[0]);
   ASSERT(64, g13[0].b[1]);
   ASSERT(0, g13[1].b[0]);
-  ASSERT(321, g13[1].b[1]);
+  ASSERT(-191, g13[1].b[1]);
 
   ASSERT(7, sizeof(g17));
   ASSERT(10, sizeof(g18));

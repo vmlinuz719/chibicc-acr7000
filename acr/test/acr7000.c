@@ -158,7 +158,8 @@ int main() {
   ASSERT(4, sizeof(int));
   ASSERT(4, sizeof(long long));
   ASSERT(4, sizeof(void *));
-  ASSERT(511, CHAR_MAX);
+  ASSERT(255, CHAR_MAX);
+  ASSERT(-256, CHAR_MIN);
   ASSERT(-256, SCHAR_MIN);
   ASSERT(131071, SHRT_MAX);
   ASSERT(20, sizeof(struct mix));
@@ -171,8 +172,10 @@ int main() {
 
   // Every position of a word, through pointers and directly
   ASSERT(0, ({ char b[8]; for (int i = 0; i < 8; i++) set_char(b, i, 'a' + i); int bad = 0; for (int i = 0; i < 8; i++) bad += get_char(b, i) != 'a' + i; bad; }));
-  ASSERT(0x14f, ({ char b[4] = {1, 2, 3, 4}; b[0] = 0x1ff; b[2] = 0x14f; b[2]; }));
-  ASSERT(511, ({ char b[4] = {1, 2, 3, 4}; b[0] = 0x1ff; b[0]; }));
+  ASSERT(-177, ({ char b[4] = {1, 2, 3, 4}; b[0] = 0x1ff; b[2] = 0x14f; b[2]; }));
+  ASSERT(0x14f, ({ unsigned char b[4] = {1, 2, 3, 4}; b[0] = 0x1ff; b[2] = 0x14f; b[2]; }));
+  ASSERT(-1, ({ char b[4] = {1, 2, 3, 4}; b[0] = 0x1ff; b[0]; }));
+  ASSERT(511, ({ unsigned char b[4] = {1, 2, 3, 4}; b[0] = 0x1ff; b[0]; }));
   ASSERT(2, ({ char b[4] = {1, 2, 3, 4}; b[0] = 0x1ff; b[1]; }));
   ASSERT(4, ({ char b[4] = {1, 2, 3, 4}; b[0] = 0x1ff; b[3]; }));
   ASSERT(01002003004, ({ char b[4] = {1, 2, 3, 4}; *(int *)b; }));
@@ -182,16 +185,18 @@ int main() {
   ASSERT(1, ({ short s[2] = {5, 6}; *(int *)s == (5 << 18 | 6); }));
   ASSERT(-5, ({ signed char s[2] = {3, -5}; get_schar(s, 1); }));
 
-  // Narrow arithmetic and conversions; plain char is unsigned
+  // Narrow arithmetic and conversions; plain char is signed
   ASSERT(-131072, ({ short s = 131071; s++; s; }));
   ASSERT(0, ({ unsigned short u = 262143; u++; u; }));
   ASSERT(-256, ({ signed char c = 255; c++; c; }));
-  ASSERT(511, ({ char c = -1; c; }));
-  ASSERT(0, (char)-1 < 0);
+  ASSERT(-1, ({ char c = -1; c; }));
+  ASSERT(511, ({ unsigned char c = -1; c; }));
+  ASSERT(1, (char)-1 < 0);
+  ASSERT(0, (unsigned char)-1 < 0);
   ASSERT(1, (signed char)-1 < 0);
   ASSERT(0x1ff, (unsigned char)0x12345fff);
   ASSERT(-1, (short)0x3ffff);
-  ASSERT(262652, char_param(-1, -1, -1, -1));
+  ASSERT(262140, char_param(-1, -1, -1, -1));
   ASSERT(15, va_char(5, 10));
   ASSERT(-90, va_short(-100, 10));
   ASSERT(-105, sum_va(3, (char)200, (short)-300, (signed char)-5));

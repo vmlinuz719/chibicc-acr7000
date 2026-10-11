@@ -199,8 +199,8 @@ int main() {
   g1 = 3;
 
   ASSERT(3, *g1_ptr());
-  ASSERT(261, int_to_char(261));
-  ASSERT(261, int_to_char(261));
+  ASSERT(-251, int_to_char(261));
+  ASSERT(-251, int_to_char(261));
   ASSERT(-5, div_long(-10, 2));
 
   ASSERT(1, bool_fn_add(3));

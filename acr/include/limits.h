@@ -2,7 +2,7 @@
 #define __LIMITS_H
 
 // ACR-7000: 9-bit chars, 18-bit shorts and 36-bit ints, longs and long
-// longs. Plain char is unsigned.
+// longs. Plain char is signed.
 
 #define CHAR_BIT 9
 #define MB_LEN_MAX 4
@@ -10,8 +10,8 @@
 #define SCHAR_MAX 255
 #define SCHAR_MIN (-256)
 #define UCHAR_MAX 511
-#define CHAR_MAX UCHAR_MAX
-#define CHAR_MIN 0
+#define CHAR_MAX SCHAR_MAX
+#define CHAR_MIN SCHAR_MIN
 
 #define SHRT_MAX 131071
 #define SHRT_MIN (-131072)

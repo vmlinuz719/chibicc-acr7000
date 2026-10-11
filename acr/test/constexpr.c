@@ -29,7 +29,7 @@ int main() {
   ASSERT(2, ({ char x[(1&&1)+1]; sizeof(x); }));
   ASSERT(1, ({ char x[(1&&0)+1]; sizeof(x); }));
   ASSERT(3, ({ char x[(int)3]; sizeof(x); }));
-  ASSERT(0x10f, ({ char x[(char)0xffffff0f]; sizeof(x); }));
+  ASSERT(0x8f, ({ char x[(char)0xfffffe8f]; sizeof(x); }));
   ASSERT(0x10f, ({ char x[(short)0xfff0010f]; sizeof(x); }));
   ASSERT(4, ({ char x[(int)0xfffffffff+5]; sizeof(x); }));
   ASSERT(2, ({ char x[(int*)0+2]; sizeof(x); }));

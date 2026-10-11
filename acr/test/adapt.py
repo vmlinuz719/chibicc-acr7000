@@ -259,7 +259,7 @@ adapt('bitfield.c', [
     (', sizeof(struct {long x:1; }));', 'ASSERT(4, sizeof(struct {long x:1; }));'),
 ])
 
-# 9-bit chars (plain char unsigned), 18-bit shorts, 36-bit ints and longs, big-endian packing
+# 9-bit chars, 18-bit shorts, 36-bit ints and longs, big-endian packing
 adapt('cast.c', [
     (', (int)8590066177);', 'ASSERT(8590066177, (int)8590066177);'),
     (', (short)8590066177);', 'ASSERT(-130559, (short)8590066177);'),
@@ -292,7 +292,7 @@ adapt('decl.c', [
 
 # char and short are 9 and 18 bits; the *_fn helpers are defined as returning int but declared returning narrower types, and the ACR-7000 ABI does not narrow return values at the call
 adapt('function.c', [
-    (', int_to_char(261));', 'ASSERT(261, int_to_char(261));'),
+    (', int_to_char(261));', 'ASSERT(-251, int_to_char(261));'),
     (', true_fn());', 'ASSERT(513, true_fn());'),
     (', false_fn());', 'ASSERT(512, false_fn());'),
     (', char_fn());', 'ASSERT(515, char_fn());'),
@@ -311,7 +311,7 @@ adapt('initializer.c', [
     (', g13[0].b[0]);', 'ASSERT(0, g13[0].b[0]);'),
     (', g13[0].b[1]);', 'ASSERT(64, g13[0].b[1]);'),
     (', g13[1].b[0]);', 'ASSERT(0, g13[1].b[0]);'),
-    (', g13[1].b[1]);', 'ASSERT(321, g13[1].b[1]);'),
+    (', g13[1].b[1]);', 'ASSERT(-191, g13[1].b[1]);'),
     (', *g28);', 'ASSERT(402653184, *g28);'),
     (', sizeof(g65));', 'ASSERT(7, sizeof(g65));'),
     (', sizeof(g66));', 'ASSERT(10, sizeof(g66));'),
@@ -320,7 +320,7 @@ adapt('initializer.c', [
     (', g50.a);', 'ASSERT(9216, g50.a);'),
 ])
 
-# 36-bit int and long; plain char is unsigned; shifts beyond 35 bits rewritten
+# 36-bit int and long; 9-bit chars; shifts beyond 35 bits rewritten
 adapt('literal.c', [
     (", '\\x80');", "ASSERT(128, '\\x80');"),
     (', sizeof(0L));', 'ASSERT(4, sizeof(0L));'),
@@ -465,8 +465,8 @@ adapt('constexpr.c', [
     ('float g40', DEL), ('double g41', DEL), ('g40', DEL), ('g41', DEL),
     ('char x[(int)0xfffffffffff+5]', 'ASSERT(4, ({ char x[(int)0xfffffffff+5]; sizeof(x); }));'),
     ('char x[(unsigned int)0xfffffffffff>>31]', 'ASSERT(31, ({ char x[(unsigned int)0xfffffffff>>31]; sizeof(x); }));'),
-    # truncation to 9-bit chars (unsigned) and 18-bit shorts
-    ('char x[(char)0xffffff0f]', 'ASSERT(0x10f, ({ char x[(char)0xffffff0f]; sizeof(x); }));'),
+    # truncation to 9-bit chars and 18-bit shorts
+    ('char x[(char)0xffffff0f]', 'ASSERT(0x8f, ({ char x[(char)0xfffffe8f]; sizeof(x); }));'),
     ('char x[(short)0xffff010f]', 'ASSERT(0x10f, ({ char x[(short)0xfff0010f]; sizeof(x); }));'),
     ('char x[(unsigned char)0xffffffff]', 'ASSERT(511, ({ char x[(unsigned char)0xffffffff]; sizeof(x); }));'),
     ('char x[(unsigned short)0xffff800f]', 'ASSERT(0x3800f, ({ char x[(unsigned short)0xffff800f]; sizeof(x); }));'),

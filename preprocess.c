@@ -1065,7 +1065,6 @@ void init_macros(void) {
   define_macro("__acr7000__", "1");
   define_macro("__C99_MACRO_WITH_VA_ARGS", "1");
   define_macro("__CHAR_BIT__", "9");
-  define_macro("__CHAR_UNSIGNED__", "1");
   define_macro("__SIZEOF_DOUBLE__", "8");
   define_macro("__SIZEOF_FLOAT__", "4");
   define_macro("__SIZEOF_INT__", "4");
