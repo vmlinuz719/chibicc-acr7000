@@ -5,15 +5,20 @@
 // expression is computed into X0, and intermediate values are pushed onto
 // the hardware stack.
 //
-// Data model: every scalar type is one 36-bit word (sizeof(char) ==
-// sizeof(int) == sizeof(void *) == 1), and pointers are plain word
-// addresses. Floating point is not supported; any attempt to generate
+// Data model: chars are 9 bits and shorts 18, packed big-endian four or
+// two to a word; ints, longs and pointers are a word (sizes count chars,
+// so sizeof(int) == 4). Pointers to word-aligned types are word
+// addresses, short pointers word << 1 | half and char (and void)
+// pointers word << 2 | quarter (see ptr_unit in type.c). Registers hold
+// chars and shorts sign- or zero-extended to 36 bits. Every variable
+// starts a word; a lone char or short sits at the low end of its word.
+// Floating point is not supported; any attempt to generate
 // floating-point code is an error.
 //
 // Registers:
 //   X0       expression result / primary operand
 //   X1       secondary operand
-//   X2-X5    scratch (copies, bit-fields, alloca)
+//   X2-X5    scratch (copies, bit-fields, alloca, byte pointers)
 //   AC MQ XY multiply/divide operands; AC holds function return values
 //   AP       frame pointer
 //   SP       stack pointer (stacks grow downward)
@@ -24,7 +29,8 @@
 // so after calls the stack holds the return address, the mask and the
 // caller's AP, followed by the arguments. Functions returning a struct or
 // union receive a pointer to a caller-provided buffer as a hidden first
-// argument and return that pointer. The caller pops its arguments.
+// argument and return that pointer. The caller pops its arguments. Every
+// argument takes a whole number of words; frame offsets are in words.
 //
 //        ...
 //        arg 1               3+n(ap)
@@ -126,13 +132,6 @@ int align_to(int n, int align) {
 // Labels
 //
 
-// Reduce a value to a 36-bit word, sign-extended unless unsigned.
-int64_t wrap_word(int64_t val, bool is_unsigned) {
-  uint64_t u = (uint64_t)val & WORD_MASK;
-  if (!is_unsigned && (u >> (WORD_BITS - 1)))
-    return (int64_t)(u | ~WORD_MASK);
-  return u;
-}
 
 static uint64_t fnv1a(uint64_t h, char *p, size_t len) {
   for (size_t i = 0; i < len; i++) {
@@ -392,37 +391,24 @@ static void shift_right(int n, bool is_unsigned) {
   }
 }
 
-// Copy `n` words from the address in `src` to the address in `dst`.
-// Clobbers X2-X5 but preserves `src` and `dst`.
-static void copy_words(char *src, char *dst, int n) {
-  if (n <= 6) {
-    for (int i = 0; i < n; i++) {
-      emit("ld", "x2, %d(%s)", i, src);
-      emit("st", "x2, %d(%s)", i, dst);
-    }
-    return;
-  }
-
-  emit("movr", "%s, x3", src);
-  emit("movr", "%s, x4", dst);
-  load_imm("x2", n);
-  emit("ld", "x5, 0(x3)");
-  emit("st", "x5, 0(x4)");
-  emit("incr", "x3, x3");
-  emit("incr", "x4, x4");
-  emit("addi.rn", "x2, x2, -1");
-  emit("jmp", ".-5");
-}
-
 //
 // Expressions
 //
+
+static int words(int size) {
+  return (size + WORD_CHARS - 1) / WORD_CHARS;
+}
+
+static int log2_unit(int unit) {
+  return unit == 4 ? 0 : unit == 2 ? 1 : 2;
+}
 
 // Large global objects may lie beyond the reach of 18-bit address fields
 // (they are placed at the end of the program), so their address is
 // loaded from a word holding it.
 static bool is_far(Obj *var) {
-  return !var->is_local && var->ty->kind != TY_FUNC && var->ty->size >= BIG_BSS;
+  return !var->is_local && var->ty->kind != TY_FUNC &&
+         var->ty->size >= BIG_BSS * WORD_CHARS;
 }
 
 static HashMap far_words;     // object label -> address word label
@@ -448,18 +434,66 @@ static bool is_scalar(Type *ty) {
   return ty && (is_integer(ty) || ty->kind == TY_PTR);
 }
 
-// The memory operand for a variable that can be addressed directly.
+// Word-sized scalars are accessed with ordinary memory references;
+// chars and shorts with the byte instructions.
+static bool is_word_scalar(Type *ty) {
+  return is_scalar(ty) && ty->size == WORD_CHARS;
+}
+
+// The address field of the (first) word of a variable.
 static char *var_operand(Obj *var) {
   if (var->is_local)
     return disp(var->offset, "ap");
   return sym(var->name);
 }
 
-// A conversion between integer or pointer types that leaves the value
-// unchanged (all of them are one word, except conversions to _Bool).
+// Reduce a value to `bits` bits, sign-extended unless unsigned.
+int64_t wrap_bits(int64_t val, int bits, bool is_unsigned) {
+  uint64_t mask = (bits >= 64) ? ~0ULL : (1ULL << bits) - 1;
+  uint64_t u = (uint64_t)val & mask;
+  if (!is_unsigned && bits < 64 && (u >> (bits - 1)))
+    return (int64_t)(u | ~mask);
+  return u;
+}
+
+int64_t wrap_word(int64_t val, bool is_unsigned) {
+  return wrap_bits(val, WORD_BITS, is_unsigned);
+}
+
+// The value an object of type `ty` holds when assigned `val`.
+int64_t wrap_type(int64_t val, Type *ty) {
+  if (ty->kind == TY_BOOL)
+    return wrap_word(val, true) != 0;
+  if (is_integer(ty))
+    return wrap_bits(val, MIN(ty->size, WORD_CHARS) * CHAR_BITS, ty->is_unsigned);
+  return wrap_word(val, true);
+}
+
+// Returns true if every value of type `from` is held in a register
+// exactly as it would be as a `to`, so that no conversion code is needed.
+// Registers hold chars and shorts sign- or zero-extended to 36 bits.
+static bool same_value(Type *from, Type *to) {
+  if (to->kind == TY_BOOL)
+    return from->kind == TY_BOOL;
+  if (is_pointer_like(from) && is_pointer_like(to))
+    return value_unit(from) == value_unit(to);
+  if (!is_integer(to))
+    return true;
+  if (to->size >= WORD_CHARS)
+    return true;
+  if (!is_integer(from))
+    return false;
+  if (from->kind == TY_BOOL)
+    return true;
+  int f = from->size, t = to->size;
+  if (from->is_unsigned)
+    return t > f || (t == f && to->is_unsigned);
+  return !to->is_unsigned && t >= f;
+}
+
 static bool is_noop_cast(Node *node) {
   return node->kind == ND_CAST && is_scalar(node->ty) &&
-         is_scalar(node->lhs->ty) && node->ty->kind != TY_BOOL;
+         is_scalar(node->lhs->ty) && same_value(node->lhs->ty, node->ty);
 }
 
 static Node *strip_casts(Node *node) {
@@ -481,7 +515,10 @@ static bool eval_const(Node *node, int64_t *val) {
   case ND_CAST:
     if (!is_scalar(node->lhs->ty) || !eval_const(node->lhs, &a))
       return false;
-    *val = (node->ty->kind == TY_BOOL) ? (wrap_word(a, true) != 0) : a;
+    if (is_pointer_like(node->lhs->ty) && is_pointer_like(node->ty))
+      a = (int64_t)((uint64_t)wrap_word(a, true) * value_unit(node->lhs->ty) /
+                    value_unit(node->ty));
+    *val = a;
     break;
   case ND_NEG:
     if (!eval_const(node->lhs, &a))
@@ -576,7 +613,7 @@ static bool eval_const(Node *node, int64_t *val) {
     return false;
   }
 
-  *val = wrap_word(*val, node->ty->is_unsigned);
+  *val = wrap_type(*val, node->ty);
   return true;
 }
 
@@ -584,22 +621,23 @@ static bool is_const_int(Node *node, int64_t *val) {
   return eval_const(node, val);
 }
 
-// A pointer variable whose value can be used through indirection.
+// A word pointer variable, whose target can be reached through
+// indirection ("@"), which is valid because addresses never have bit
+// 35 set.
 static bool is_ptr_var(Node *node) {
   node = strip_casts(node);
-  return node->kind == ND_VAR && node->var->ty->kind == TY_PTR;
+  return node->kind == ND_VAR && node->var->ty->kind == TY_PTR &&
+         ptr_unit(node->var->ty->base) == WORD_CHARS;
 }
 
 static Obj *ptr_var(Node *node) {
   return strip_casts(node)->var;
 }
 
-// If the scalar lvalue `node` can be accessed with a single memory
-// reference instruction, return the address field for it, else NULL.
-// Pointer variables are dereferenced with indirect addressing ("@"),
-// which is valid because addresses never have bit 35 set.
+// If the word-sized scalar lvalue `node` can be accessed with a single
+// memory reference instruction, return the address field for it.
 static char *operand(Node *node) {
-  if (!is_scalar(node->ty))
+  if (!is_word_scalar(node->ty))
     return NULL;
 
   switch (node->kind) {
@@ -614,7 +652,7 @@ static char *operand(Node *node) {
   case ND_MEMBER: {
     if (node->member->is_bitfield)
       return NULL;
-    int off = node->member->offset;
+    int off = node->member->offset / WORD_CHARS;
     Node *base = node->lhs;
     if (base->kind == ND_VAR && base->var->ty->kind != TY_VLA) {
       if (base->var->is_local)
@@ -631,26 +669,247 @@ static char *operand(Node *node) {
   return NULL;
 }
 
+// A scalar at a fixed place: in the frame, at a label, or at a constant
+// offset from what a word pointer variable points to.
+typedef struct {
+  char *prep;  // instruction that loads the base register, or NULL
+  char *word;  // address field of the word holding the value
+  int pos;     // big-endian position of a char (0-3) or short (0-1)
+  bool whole;  // a char or short with a word of its own
+} Access;
+
+// Find an lvalue's location as a variable or word pointer variable plus
+// a constant offset in chars.
+static bool static_lvalue(Node *node, Obj **var, Obj **ptr, int64_t *off) {
+  switch (node->kind) {
+  case ND_VAR:
+    if (node->var->ty->kind == TY_VLA)
+      return false;
+    *var = node->var;
+    *off = var_start(node->var->ty);
+    return true;
+  case ND_MEMBER:
+    if (node->member->is_bitfield || !static_lvalue(node->lhs, var, ptr, off))
+      return false;
+    *off += node->member->offset;
+    return true;
+  case ND_DEREF: {
+    Node *p = node->lhs;
+    if (!is_pointer_like(p->ty))
+      return false;
+    int unit = value_unit(p->ty);
+    int64_t c = 0;
+    if ((p->kind == ND_ADD || p->kind == ND_SUB) && eval_const(p->rhs, &c)) {
+      if (p->kind == ND_SUB)
+        c = -c;
+      p = p->lhs;
+    }
+    p = strip_casts(p);
+    if (!is_pointer_like(p->ty) || value_unit(p->ty) != unit)
+      return false;
+
+    if (p->kind == ND_VAR && p->var->ty->kind == TY_ARRAY) {
+      *var = p->var;
+      *off = c * unit;
+      return true;
+    }
+    if (is_ptr_var(p) && unit == WORD_CHARS) {
+      *ptr = p->var;
+      *off = c * unit;
+      return true;
+    }
+    if (p->kind == ND_ADDR && static_lvalue(p->lhs, var, ptr, off)) {
+      *off += c * unit;
+      return true;
+    }
+    return false;
+  }
+  }
+  return false;
+}
+
+static bool static_access(Node *node, Access *a) {
+  if (!is_scalar(node->ty) || node->ty->size > WORD_CHARS)
+    return false;
+
+  Obj *var = NULL, *ptr = NULL;
+  int64_t off;
+  if (!static_lvalue(node, &var, &ptr, &off))
+    return false;
+
+  int64_t w = (off >= 0) ? off / WORD_CHARS : -((-off + WORD_CHARS - 1) / WORD_CHARS);
+  int r = off - w * WORD_CHARS;
+  int size = node->ty->size;
+  if (r % size)
+    return false;
+
+  *a = (Access){NULL, NULL, r / size, false};
+  a->whole = (node->kind == ND_VAR && var_start(node->ty) > 0);
+
+  if (var && var->is_local) {
+    a->word = disp(var->offset + w, "ap");
+  } else if (var && is_far(var)) {
+    a->prep = format("ld          x3, %s", far_word(var));
+    a->word = disp(w, "x3");
+  } else if (var && w == 0) {
+    a->word = sym(var->name);
+  } else if (var) {
+    a->prep = format("ldea        x3, %s", sym(var->name));
+    a->word = disp(w, "x3");
+  } else if (w == 0) {
+    a->word = format("@%s", var_operand(ptr));
+  } else {
+    a->prep = format("ld          x3, %s", var_operand(ptr));
+    a->word = disp(w, "x3");
+  }
+  return true;
+}
+
+// Normalize a char or short in `reg` (taken from the low bits) to the
+// way registers hold values of type `ty`.
+static void extend(char *reg, Type *ty) {
+  int bits = ty->size * CHAR_BITS;
+  if (bits >= WORD_BITS)
+    return;
+  if (ty->is_unsigned) {
+    emit("movmz", "%s, %s, %d", reg, reg, WORD_BITS - bits);
+  } else {
+    emit("movsz", "%s, %s, %s, %d", reg, reg, reg, WORD_BITS - bits);
+    emit("movrtzn", "%s, %s, 1", reg, reg);
+    emit("movsr", "%s, %s, %s, %d", reg, reg, reg, WORD_BITS - bits);
+  }
+}
+
+// Extract a char or short at position `pos` of the word in `reg`.
+static void extract(char *reg, Type *ty, int pos) {
+  int bits = ty->size * CHAR_BITS;
+  if (bits >= WORD_BITS)
+    return;
+  int rot = (bits * (pos + 1)) % WORD_BITS;  // brings it to the low end
+  if (ty->is_unsigned) {
+    if (rot)
+      emit("movrz", "%s, %s, %d, %d", reg, reg, rot, WORD_BITS - bits);
+    else
+      emit("movmz", "%s, %s, %d", reg, reg, WORD_BITS - bits);
+  } else {
+    if (pos)
+      emit("movr", "%s, %s, %d", reg, reg, bits * pos);  // to the high end
+    emit("movrtzn", "%s, %s, 1", reg, reg);
+    emit("movsr", "%s, %s, %s, %d", reg, reg, reg, WORD_BITS - bits);
+  }
+}
+
+static void load_access(Access *a, Type *ty, char *reg) {
+  if (a->prep)
+    println("            %s", a->prep);
+  emit("ld", "%s, %s", reg, a->word);
+  extract(reg, ty, a->pos);
+}
+
+// Store X0 (preserved) through an Access. Clobbers X1.
+static void store_access(Access *a, Type *ty) {
+  if (a->prep)
+    println("            %s", a->prep);
+  int bits = ty->size * CHAR_BITS;
+  if (bits >= WORD_BITS || a->whole) {
+    emit("st", "x0, %s", a->word);
+    return;
+  }
+  // A byte pointer: word address and the shift of the field.
+  emit("ldea", "x1, %s", a->word);
+  int shift = WORD_BITS - bits * (a->pos + 1);
+  if (shift)
+    emit("or", "x1, $$s%d", shift);
+  emit("stb", "x0, x1, %d", bits);
+}
+
+// Convert the char or short pointer in `reg` to a hardware byte pointer
+// (word address, plus the shift of the field in bits 27-35), using `tmp`.
+static void to_byte_pointer(char *reg, int unit, char *tmp) {
+  if (unit == 1) {
+    emit("andi", "%s, %s, 3", reg, tmp);
+    emit("movsrz", "%s, %s, %s, 2", reg, reg, reg);
+    emit("add", "%s, $$bp(%s)", reg, tmp);
+  } else {
+    emit("andi", "%s, %s, 1", reg, tmp);
+    emit("movsrz", "%s, %s, %s, 1", reg, reg, reg);
+    emit("add", "%s, $$hp(%s)", reg, tmp);
+  }
+}
+
+// Convert a pointer in X0 between representations (ptr_unit values).
+static void convert_pointer(int from, int to) {
+  int shift = log2_unit(to) - log2_unit(from);
+  if (shift > 0)
+    emit("movsz", "x0, x0, x0, %d", shift);
+  else if (shift < 0)
+    emit("movsrz", "x0, x0, x0, %d", -shift);
+}
+
+// X0 holds the word address of an object of type `ty` that starts
+// `start` chars into the word; make it a pointer in ty's representation.
+static void word_to_pointer(Type *ty, int start) {
+  int unit = ptr_unit(ty);
+  convert_pointer(WORD_CHARS, unit);
+  if (start / unit)
+    emit("addi", "x0, x0, %d", start / unit);
+}
+
+// Copy `n` words from the address in `src` to the address in `dst`.
+// Clobbers X2-X5 but preserves `src` and `dst`.
+static void copy_words(char *src, char *dst, int n) {
+  if (n <= 6) {
+    for (int i = 0; i < n; i++) {
+      emit("ld", "x2, %d(%s)", i, src);
+      emit("st", "x2, %d(%s)", i, dst);
+    }
+    return;
+  }
+
+  emit("movr", "%s, x3", src);
+  emit("movr", "%s, x4", dst);
+  load_imm("x2", n);
+  emit("ld", "x5, 0(x3)");
+  emit("st", "x5, 0(x4)");
+  emit("incr", "x3, x3");
+  emit("incr", "x4, x4");
+  emit("addi.rn", "x2, x2, -1");
+  emit("jmp", ".-5");
+}
+
 // Returns true if `node` can be evaluated straight into any register
-// without disturbing X0 or the stack: a constant or a memory operand.
+// without disturbing X0 or the stack: a constant or a value at a fixed
+// place. (Clobbers X3.)
 static bool is_simple(Node *node) {
   int64_t val;
+  Access a;
   if (eval_const(node, &val))
     return true;
   node = strip_casts(node);
-  return node->kind != ND_ASSIGN && operand(node);
+  if (node->kind != ND_VAR && node->kind != ND_DEREF && node->kind != ND_MEMBER)
+    return false;
+  return operand(node) || static_access(node, &a);
 }
 
 static void gen_simple(Node *node, char *reg) {
   int64_t val;
-  if (eval_const(node, &val))
+  Access a;
+  if (eval_const(node, &val)) {
     load_imm(reg, val);
-  else
-    emit("ld", "%s, %s", reg, operand(strip_casts(node)));
+    return;
+  }
+  Node *n = strip_casts(node);
+  char *op = operand(n);
+  if (op) {
+    emit("ld", "%s, %s", reg, op);
+  } else {
+    static_access(n, &a);
+    load_access(&a, n->ty, reg);
+  }
 }
 
-// Compute the absolute address of a given node into X0.
-// It's an error if a given node does not reside in memory.
+// Compute the address of a given node into X0, in the representation
+// for pointers to its type. It's an error if the node is not in memory.
 static void gen_addr(Node *node) {
   switch (node->kind) {
   case ND_VAR:
@@ -663,15 +922,14 @@ static void gen_addr(Node *node) {
     // Local variable
     if (node->var->is_local) {
       emit("ldea", "x0, %s", disp(node->var->offset, "ap"));
-      return;
-    }
-
-    // Function or global variable. (Thread-local variables are ordinary
-    // globals; the ACR-7000 runs a single thread of C code.)
-    if (is_far(node->var))
+    } else if (is_far(node->var)) {
       emit("ld", "x0, %s", far_word(node->var));
-    else
+    } else {
+      // Function or global variable. (Thread-local variables are
+      // ordinary globals; the ACR-7000 runs a single thread of C code.)
       emit("ldea", "x0, %s", sym(node->var->name));
+    }
+    word_to_pointer(node->var->ty, var_start(node->var->ty));
     return;
   case ND_DEREF:
     gen_expr(node->lhs);
@@ -680,11 +938,15 @@ static void gen_addr(Node *node) {
     gen_expr(node->lhs);
     gen_addr(node->rhs);
     return;
-  case ND_MEMBER:
-    gen_addr(node->lhs);
-    if (node->member->offset)
-      emit("ldea", "x0, %s", disp(node->member->offset, "x0"));
+  case ND_MEMBER: {
+    gen_addr(node->lhs);  // a struct or union: a word address
+    int unit = ptr_unit(node->member->ty);
+    int off = node->member->offset;
+    convert_pointer(WORD_CHARS, unit);
+    if (off / unit)
+      emit("ldea", "x0, %s", disp(off / unit, "x0"));
     return;
+  }
   case ND_FUNCALL:
     if (node->ret_buffer) {
       gen_expr(node);
@@ -706,7 +968,7 @@ static void gen_addr(Node *node) {
   error_tok(node->tok, "not an lvalue");
 }
 
-// Load a value from where X0 is pointing to.
+// Load a value of type `ty` from where X0 points. Clobbers X1.
 static void load(Node *node, Type *ty) {
   switch (ty->kind) {
   case TY_ARRAY:
@@ -727,17 +989,26 @@ static void load(Node *node, Type *ty) {
     no_float(node->tok);
   }
 
-  emit("ld", "x0, 0(x0)");
+  if (ty->size >= WORD_CHARS) {
+    emit("ld", "x0, 0(x0)");
+    return;
+  }
+
+  to_byte_pointer("x0", ptr_unit(ty), "x1");
+  emit("ldb", "x0, x0, %d", ty->size * CHAR_BITS);
+  if (!ty->is_unsigned)
+    extend("x0", ty);
 }
 
-// Store X0 to an address that the stack top is pointing to.
+// Store X0 to an address that the stack top is pointing to. Clobbers
+// X1-X5.
 static void store(Node *node, Type *ty) {
   pop("x1");
 
   switch (ty->kind) {
   case TY_STRUCT:
   case TY_UNION:
-    copy_words("x0", "x1", ty->size);
+    copy_words("x0", "x1", words(ty->size));
     return;
   case TY_FLOAT:
   case TY_DOUBLE:
@@ -745,7 +1016,13 @@ static void store(Node *node, Type *ty) {
     no_float(node->tok);
   }
 
-  emit("st", "x0, 0(x1)");
+  if (ty->size >= WORD_CHARS) {
+    emit("st", "x0, 0(x1)");
+    return;
+  }
+
+  to_byte_pointer("x1", ptr_unit(ty), "x2");
+  emit("stb", "x0, x1, %d", ty->size * CHAR_BITS);
 }
 
 static void cmp_zero_check(Node *node) {
@@ -760,18 +1037,36 @@ static void cast(Node *node, Type *from, Type *to) {
   if (is_flonum(from) || is_flonum(to))
     no_float(node->tok);
 
-  // All integer types and pointers are one word wide, so conversions
-  // between them are no-ops, except that _Bool normalizes to 0 or 1.
-  if (to->kind == TY_BOOL)
+  if (to->kind == TY_BOOL) {
     set_if_nonzero();
+    return;
+  }
+
+  if (is_pointer_like(from) && is_pointer_like(to)) {
+    convert_pointer(value_unit(from), value_unit(to));
+    return;
+  }
+
+  if (is_integer(to) && !same_value(from, to)) {
+    // Truncate to the width of a char or short.
+    int bits = to->size * CHAR_BITS;
+    if (to->is_unsigned) {
+      emit("movmz", "x0, x0, %d", WORD_BITS - bits);
+    } else {
+      emit("movsz", "x0, x0, x0, %d", WORD_BITS - bits);
+      emit("movrtzn", "x0, x0, 1");
+      emit("movsr", "x0, x0, x0, %d", WORD_BITS - bits);
+    }
+  }
 }
 
 static void push_struct(Type *ty) {
-  if (ty->size == 0)
+  int n = words(ty->size);
+  if (n == 0)
     return;
-  emit("addea", "sp, %d", -ty->size);
-  depth += ty->size;
-  copy_words("x0", "sp", ty->size);
+  emit("addea", "sp, %d", -n);
+  depth += n;
+  copy_words("x0", "sp", n);
 }
 
 static int push_args2(Node *args) {
@@ -785,7 +1080,7 @@ static int push_args2(Node *args) {
   case TY_STRUCT:
   case TY_UNION:
     push_struct(args->ty);
-    return stack + args->ty->size;
+    return stack + words(args->ty->size);
   case TY_FLOAT:
   case TY_DOUBLE:
   case TY_LDOUBLE:
@@ -798,7 +1093,8 @@ static int push_args2(Node *args) {
 
 // Push function call arguments right to left, followed by the address
 // of the return buffer if the function returns a struct or union.
-// Returns the number of words pushed.
+// Every argument takes a whole number of words. Returns the number of
+// words pushed.
 static int push_args(Node *node) {
   int stack = push_args2(node->args);
 
@@ -810,11 +1106,13 @@ static int push_args(Node *node) {
   return stack;
 }
 
-// alloca: X0 holds the size in words. The temporaries between SP and
+// alloca: X0 holds the size in chars. The temporaries between SP and
 // the alloca bottom are moved down to make room, and X0 receives the
-// address of the new block.
+// address of the new block (a char pointer).
 static void builtin_alloca(void) {
   char *bottom = disp(current_fn->alloca_bottom->offset, "ap");
+  emit("addi", "x0, x0, %d", WORD_CHARS - 1);
+  emit("movsrz", "x0, x0, x0, 2");  // size in words
   emit("ld", "x1, %s", bottom);
   emit("movr", "x1, x2");
   emit("subr", "sp, x2");       // x2 = number of temporary words
@@ -833,8 +1131,24 @@ static void builtin_alloca(void) {
   emit("subr", "x0, x1");
   emit("st", "x1, %s", bottom);
   emit("movr", "x1, x0");
+  convert_pointer(WORD_CHARS, 1);
 }
 
+// Load ("ld") or store ("st") `reg` through `ptr`, which holds a word
+// address, or a byte pointer for chars and shorts. Loaded chars and
+// shorts are zero-extended unless `sign` is set.
+static void hw_access(char *op, char *reg, char *ptr, Type *ty, bool sign) {
+  if (ty->size >= WORD_CHARS) {
+    emit(op, "%s, 0(%s)", reg, ptr);
+    return;
+  }
+  bool is_load = !strcmp(op, "ld");
+  emit(is_load ? "ldb" : "stb", "%s, %s, %d", reg, ptr, ty->size * CHAR_BITS);
+  if (is_load && sign && !ty->is_unsigned)
+    extend(reg, ty);
+}
+
+// Extract a bit-field from its storage unit in X0.
 static void load_bitfield(Member *mem) {
   shift_left(WORD_BITS - mem->bit_width - mem->bit_offset);
   shift_right(WORD_BITS - mem->bit_width, mem->ty->is_unsigned);
@@ -881,11 +1195,17 @@ static void gen_expr(Node *node) {
     return;
   }
 
-  char *op = operand(node);
-  if (op && (node->kind == ND_VAR || node->kind == ND_DEREF ||
-             node->kind == ND_MEMBER)) {
-    emit("ld", "x0, %s", op);
-    return;
+  if (node->kind == ND_VAR || node->kind == ND_DEREF || node->kind == ND_MEMBER) {
+    char *op = operand(node);
+    if (op) {
+      emit("ld", "x0, %s", op);
+      return;
+    }
+    Access a;
+    if (static_access(node, &a)) {
+      load_access(&a, node->ty, "x0");
+      return;
+    }
   }
 
   switch (node->kind) {
@@ -922,12 +1242,20 @@ static void gen_expr(Node *node) {
   case ND_ADDR:
     gen_addr(node->lhs);
     return;
-  case ND_ASSIGN:
+  case ND_ASSIGN: {
     if (operand(node->lhs)) {
       gen_expr(node->rhs);
       if (is_flonum(node->ty))
         no_float(node->tok);
       emit("st", "x0, %s", operand(node->lhs));
+      return;
+    }
+
+    Access a;
+    if (static_access(node->lhs, &a)) {
+      gen_expr(node->rhs);
+      static_access(node->lhs, &a);
+      store_access(&a, node->lhs->ty);
       return;
     }
 
@@ -949,7 +1277,7 @@ static void gen_expr(Node *node) {
       emit("movr", "x0, x4");       // new bits in place
 
       emit("ld", "x0, 0(sp)");      // the address
-      emit("ld", "x0, 0(x0)");
+      load(node, mem->ty);
       load_imm("x2", ~mask & WORD_MASK);
       emit("andr", "x2, x0");
       emit("bisr", "x4, x0");
@@ -960,6 +1288,7 @@ static void gen_expr(Node *node) {
 
     store(node, node->ty);
     return;
+  }
   case ND_STMT_EXPR:
     for (Node *n = node->body; n; n = n->next) {
       if (!n->next && n->kind == ND_EXPR_STMT)
@@ -977,7 +1306,7 @@ static void gen_expr(Node *node) {
     cast(node, node->lhs->ty, node->ty);
     return;
   case ND_MEMZERO: {
-    int n = node->var->ty->size;
+    int n = words(node->var->ty->size);
     int off = node->var->offset;
     if (n <= 6) {
       emit("xorr", "x1, x1");
@@ -1053,38 +1382,48 @@ static void gen_expr(Node *node) {
     return;
   }
   case ND_LABEL_VAL:
+    // A void pointer, so a char pointer.
     emit("ldea", "x0, %s", sym(node->unique_label));
+    convert_pointer(WORD_CHARS, 1);
     return;
   case ND_CAS: {
+    Type *ty = node->cas_addr->ty->base;
     gen_expr(node->cas_addr);
     push();
     gen_expr(node->cas_new);
     push();
     gen_expr(node->cas_old);
     emit("movr", "x0, x3");           // x3 = pointer to the expected value
-    emit("ld", "x2, 0(x3)");          // x2 = expected value
     pop("xy");                        // xy = new value
     pop("x1");                        // x1 = address
+    if (ty->size < WORD_CHARS) {
+      to_byte_pointer("x1", ptr_unit(ty), "x2");
+      to_byte_pointer("x3", ptr_unit(ty), "x2");
+    }
 
     // Interrupts are never enabled while C code runs, so a plain
     // compare-and-store is atomic.
-    emit("ld", "mq, 0(x1)");
+    hw_access("ld", "x2", "x3", ty, false);  // x2 = expected value
+    hw_access("ld", "mq", "x1", ty, false);  // mq = current value
     emit("cmpne", "mq, x2");
     emit("jmp", ".4");
-    emit("st", "xy, 0(x1)");
+    hw_access("st", "xy", "x1", ty, false);
     emit("ldea", "x0, 1");
     emit("jmp", ".3");
-    emit("st", "mq, 0(x3)");
+    hw_access("st", "mq", "x3", ty, false);
     emit("xorr", "x0, x0");
     return;
   }
   case ND_EXCH: {
+    Type *ty = node->lhs->ty->base;
     gen_expr(node->lhs);
     push();
     gen_expr(node->rhs);
     pop("x1");
-    emit("ld", "x2, 0(x1)");
-    emit("st", "x0, 0(x1)");
+    if (ty->size < WORD_CHARS)
+      to_byte_pointer("x1", ptr_unit(ty), "x2");
+    hw_access("ld", "x2", "x1", ty, true);
+    hw_access("st", "x0", "x1", ty, false);
     emit("movr", "x2, x0");
     return;
   }
@@ -1562,7 +1901,8 @@ static void gen_stmt(Node *node) {
     emit("jmp", "%s", label_of(node->unique_label));
     return;
   case ND_GOTO_EXPR:
-    gen_expr(node->lhs);
+    gen_expr(node->lhs);  // a void pointer
+    convert_pointer(1, WORD_CHARS);
     emit("jmp", "0(x0)");
     return;
   case ND_LABEL:
@@ -1582,7 +1922,7 @@ static void gen_stmt(Node *node) {
       case TY_UNION:
         // Copy the value to the caller's buffer and return its address.
         emit("ld", "x1, %s", disp(current_fn->params->offset, "ap"));
-        copy_words("x0", "x1", ty->size);
+        copy_words("x0", "x1", words(ty->size));
         emit("movr", "x1, x0");
         break;
       case TY_FLOAT:
@@ -1617,11 +1957,12 @@ static void assign_lvar_offsets(Obj *prog) {
       continue;
 
     // Parameters (including the hidden return buffer pointer, which is
-    // first) were pushed by the caller above the call frame.
+    // first) were pushed by the caller above the call frame. Offsets
+    // are in words: every variable starts a word of its own.
     int top = 3;
     for (Obj *var = fn->params; var; var = var->next) {
       var->offset = top;
-      top += var->ty->size;
+      top += words(var->ty->size);
     }
 
     int bottom = 0;
@@ -1630,7 +1971,7 @@ static void assign_lvar_offsets(Obj *prog) {
         continue;
       if (var == fn->alloca_bottom && !fn->uses_alloca)
         continue;
-      bottom += var->ty->size;
+      bottom += words(var->ty->size);
       var->offset = -bottom;
     }
 
@@ -1672,10 +2013,11 @@ static void emit_zeros(char *label, int n) {
 
 static void emit_var(Obj *var, char *label) {
   bool is_global = !var->is_static;
+  int n = words(var->ty->size);
 
   // Common symbol: the linker places one definition.
   if (opt_fcommon && var->is_tentative && is_global) {
-    println(";@comm %s %d %s", label, var->ty->size, var->name);
+    println(";@comm %s %d %s", label, n, var->name);
     hashmap_put(&defined, label, label);
     return;
   }
@@ -1688,27 +2030,38 @@ static void emit_var(Obj *var, char *label) {
   // Large zero-filled objects go at the end of the program (see
   // acrlink.c) to keep code and other data within reach of 18-bit
   // addresses.
-  if (!var->init_data && var->ty->size >= BIG_BSS) {
-    println(";@bigbss %s %d", label, var->ty->size);
+  if (!var->init_data && n >= BIG_BSS) {
+    println(";@bigbss %s %d", label, n);
     return;
   }
 
   emit_label(label);
   if (!var->init_data) {
-    emit_zeros(label, var->ty->size);
+    emit_zeros(label, n);
     return;
+  }
+
+  // Pack the image's chars into words. A char or short on its own
+  // occupies the low end of its word.
+  uint64_t *data = calloc(n, sizeof(uint64_t));
+  int start = var_start(var->ty);
+  for (int i = 0; i < var->ty->size; i++) {
+    int c = start + i;
+    data[c / WORD_CHARS] |= var->init_data[i] <<
+                            (CHAR_BITS * (WORD_CHARS - 1 - c % WORD_CHARS));
   }
 
   Relocation *rel = var->rel;
   int pos = 0;
-  while (pos < var->ty->size) {
-    if (rel && rel->offset == pos) {
+  while (pos < n) {
+    if (rel && rel->offset / WORD_CHARS == pos) {
       char *target = sym(*rel->label);
-      if (rel->addend) {
-        // asm2 has no address arithmetic; crt0 patches in the addend.
+      int shift = log2_unit(rel->unit);
+      if (rel->addend || shift) {
+        // asm2 has no address arithmetic; crt0 patches in the value.
         char *word = new_label();
         emit_label(word);
-        println(";@fixup %s %s %ld", word, target, (long)rel->addend);
+        println(";@fixup %s %s %ld %d", word, target, (long)rel->addend, shift);
       }
       emit("dw", "%s", target);
       rel = rel->next;
@@ -1717,22 +2070,22 @@ static void emit_var(Obj *var, char *label) {
     }
 
     // Run of plain words up to the next relocation.
-    int end = rel ? rel->offset : var->ty->size;
-    int start = pos;
+    int end = rel ? rel->offset / WORD_CHARS : n;
+    int first = pos;
     while (pos < end) {
       // Long runs of zeros are left to crt0.
       int z = pos;
-      while (z < end && var->init_data[z] == 0)
+      while (z < end && data[z] == 0)
         z++;
       if (z - pos >= 16) {
-        emit_words(var->init_data + start, pos - start);
+        emit_words(data + first, pos - first);
         emit_zeros(NULL, z - pos);
-        start = pos = z;
+        first = pos = z;
         continue;
       }
       pos = (z > pos) ? z : pos + 1;
     }
-    emit_words(var->init_data + start, pos - start);
+    emit_words(data + first, pos - first);
   }
 }
 

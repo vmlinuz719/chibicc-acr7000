@@ -2,13 +2,13 @@
 
 int main() {
   ASSERT(1, ({ char x; sizeof(x); }));
-  ASSERT(1, ({ short int x; sizeof(x); }));
-  ASSERT(1, ({ int short x; sizeof(x); }));
-  ASSERT(1, ({ int x; sizeof(x); }));
-  ASSERT(1, ({ long int x; sizeof(x); }));
-  ASSERT(1, ({ int long x; sizeof(x); }));
+  ASSERT(2, ({ short int x; sizeof(x); }));
+  ASSERT(2, ({ int short x; sizeof(x); }));
+  ASSERT(4, ({ int x; sizeof(x); }));
+  ASSERT(4, ({ long int x; sizeof(x); }));
+  ASSERT(4, ({ int long x; sizeof(x); }));
 
-  ASSERT(1, ({ long long x; sizeof(x); }));
+  ASSERT(4, ({ long long x; sizeof(x); }));
 
   ASSERT(0, ({ _Bool x=0; x; }));
   ASSERT(1, ({ _Bool x=1; x; }));

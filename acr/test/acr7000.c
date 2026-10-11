@@ -1,8 +1,10 @@
-// Tests specific to the ACR-7000 port: 36-bit arithmetic, the code
-// generator's special cases, the linker's fixups and zero-fill, and the
-// C library.
+// Tests specific to the ACR-7000 port: 9-bit chars and 18-bit shorts
+// packed into 36-bit words, pointer representations, 36-bit arithmetic,
+// the code generator's special cases, the linker's fixups and zero-fill,
+// and the C library.
 #include "test.h"
 #include <limits.h>
+#include <stddef.h>
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -95,6 +97,43 @@ static int bigarr[150000];
 struct { int pad[2000]; int x; } bigs;
 int bigarr2[2000] = {[1999] = 7};
 
+// Chars and shorts
+int get_char(char *p, int i) { return p[i]; }
+void set_char(char *p, int i, int c) { p[i] = c; }
+int get_short(short *p, int i) { return p[i]; }
+int get_schar(signed char *p, int i) { return p[i]; }
+int char_param(char a, signed char b, short c, unsigned short d) { return a + b + c + d; }
+
+int va_char(char c, ...) {
+  va_list ap;
+  va_start(ap, c);
+  int x = va_arg(ap, int);
+  va_end(ap);
+  return c + x;
+}
+
+int va_short(short s, ...) {
+  va_list ap;
+  va_start(ap, s);
+  int x = va_arg(ap, int);
+  va_end(ap);
+  return s + x;
+}
+
+// a@0 b@2 c@4 d@5 e@8 f@12 g@16, size 20
+struct mix { char a; short b; char c; char d; int e; char f[3]; short g; };
+
+// a, b: char 0; c: low half of the short at 0 (char 1); d: char 2
+struct cbits { unsigned char a : 3; unsigned char b : 6; short c : 9; short d : 9; };
+
+char gstr[] = "hello, world";
+short gsh[4] = {10, -20, 30, -40};
+struct mix gmix = {1, 2, 3, 4, 5, "ab", 6};
+char *gstrp = gstr + 7;
+short *gshp = &gsh[2];
+char gch = 'q';
+short gshort = -1234;
+
 struct bits { unsigned u : 5; int s : 7; unsigned w : 24; };
 
 enum big { BIG = 0x123456789, BIGGER };
@@ -112,9 +151,90 @@ int cmp_int(const void *a, const void *b) {
 }
 
 int main() {
-  // Words are 36 bits.
-  ASSERT(36, CHAR_BIT);
-  ASSERT(1, sizeof(long long));
+  // Words are 36 bits: four 9-bit chars or two 18-bit shorts.
+  ASSERT(9, CHAR_BIT);
+  ASSERT(1, sizeof(char));
+  ASSERT(2, sizeof(short));
+  ASSERT(4, sizeof(int));
+  ASSERT(4, sizeof(long long));
+  ASSERT(4, sizeof(void *));
+  ASSERT(511, CHAR_MAX);
+  ASSERT(-256, SCHAR_MIN);
+  ASSERT(131071, SHRT_MAX);
+  ASSERT(20, sizeof(struct mix));
+  ASSERT(4, offsetof(struct mix, c));
+  ASSERT(12, offsetof(struct mix, f));
+  ASSERT(16, offsetof(struct mix, g));
+  ASSERT(8, sizeof("abcdefg"));
+  ASSERT(8, sizeof(u"abc"));
+  ASSERT(16, sizeof(U"abc"));
+
+  // Every position of a word, through pointers and directly
+  ASSERT(0, ({ char b[8]; for (int i = 0; i < 8; i++) set_char(b, i, 'a' + i); int bad = 0; for (int i = 0; i < 8; i++) bad += get_char(b, i) != 'a' + i; bad; }));
+  ASSERT(0x14f, ({ char b[4] = {1, 2, 3, 4}; b[0] = 0x1ff; b[2] = 0x14f; b[2]; }));
+  ASSERT(511, ({ char b[4] = {1, 2, 3, 4}; b[0] = 0x1ff; b[0]; }));
+  ASSERT(2, ({ char b[4] = {1, 2, 3, 4}; b[0] = 0x1ff; b[1]; }));
+  ASSERT(4, ({ char b[4] = {1, 2, 3, 4}; b[0] = 0x1ff; b[3]; }));
+  ASSERT(01002003004, ({ char b[4] = {1, 2, 3, 4}; *(int *)b; }));
+  ASSERT(-1, ({ short s[3] = {-1, 2, -3}; get_short(s, 0); }));
+  ASSERT(2, ({ short s[3] = {-1, 2, -3}; get_short(s, 1); }));
+  ASSERT(-3, ({ short s[3] = {-1, 2, -3}; get_short(s, 2); }));
+  ASSERT(1, ({ short s[2] = {5, 6}; *(int *)s == (5 << 18 | 6); }));
+  ASSERT(-5, ({ signed char s[2] = {3, -5}; get_schar(s, 1); }));
+
+  // Narrow arithmetic and conversions; plain char is unsigned
+  ASSERT(-131072, ({ short s = 131071; s++; s; }));
+  ASSERT(0, ({ unsigned short u = 262143; u++; u; }));
+  ASSERT(-256, ({ signed char c = 255; c++; c; }));
+  ASSERT(511, ({ char c = -1; c; }));
+  ASSERT(0, (char)-1 < 0);
+  ASSERT(1, (signed char)-1 < 0);
+  ASSERT(0x1ff, (unsigned char)0x12345fff);
+  ASSERT(-1, (short)0x3ffff);
+  ASSERT(262652, char_param(-1, -1, -1, -1));
+  ASSERT(15, va_char(5, 10));
+  ASSERT(-90, va_short(-100, 10));
+  ASSERT(-105, sum_va(3, (char)200, (short)-300, (signed char)-5));
+
+  // Struct members of every size, directly and through a pointer
+  ASSERT(-8145719, ({ struct mix m = {1, -2, 3, 4, 5, {6, 7, 8}, -9}; struct mix *p = &m; p->a + p->b*10 + p->c*100 + p->d*1000 + p->e*10000 + p->f[2]*100000 + p->g*1000000; }));
+  ASSERT(-8145719, ({ struct mix m = {1, -2, 3, 4, 5, {6, 7, 8}, -9}; m.a + m.b*10 + m.c*100 + m.d*1000 + m.e*10000 + m.f[2]*100000 + m.g*1000000; }));
+  ASSERT(679, ({ struct mix m = {0}; struct mix *p = &m; p->c = 7; p->g = -3; p->f[1] = 9; m.c*100 + m.g*10 + m.f[1]; }));
+  ASSERT(0, ({ struct mix m = {0}; m.d = 1; m.a + m.b + m.c; }));
+
+  // Global packed data and pointers into it
+  ASSERT(0, strcmp(gstr + 7, "world"));
+  ASSERT(0, strcmp(gstrp, "world"));
+  ASSERT(-40, gsh[3]);
+  ASSERT(-20, *(gsh + 1));
+  ASSERT(30, *gshp);
+  ASSERT('b', gmix.f[1]);
+  ASSERT(6, gmix.g);
+  ASSERT('q', gch);
+  ASSERT(-1234, gshort);
+  ASSERT(-1233, ({ gshort++; gshort; }));
+
+  // Pointer representations: word addresses, << 1 for shorts, << 2 for chars
+  ASSERT(1, ({ int x[2]; char *c = (char *)&x[1]; (int *)c == &x[1]; }));
+  ASSERT(4, ({ int x[2]; (char *)&x[1] - (char *)&x[0]; }));
+  ASSERT(2, ({ short x[2]; (char *)&x[1] - (char *)&x[0]; }));
+  ASSERT(1, ({ int x; void *v = &x; (int *)v == &x; }));
+  ASSERT(1, ({ short x[4]; void *v = &x[3]; (short *)v == &x[3]; }));
+  ASSERT(1, ({ int x[2]; (long)(char *)&x[1] == (long)&x[1] * 4; }));
+  ASSERT(1, ({ short x[2]; (long)(char *)&x[1] == (long)&x[1] * 2; }));
+  ASSERT(1, ({ short x[2]; (long)(short *)(char *)&x[1] == (long)&x[1]; }));
+  ASSERT(6765, ({ void *v = fib; int (*f)(int) = v; f(20); }));
+
+  // The C library on packed chars
+  ASSERT(0, ({ char a[11] = "0123456789", b[11]; memcpy(b, a, 11); strcmp(a, b); }));
+  ASSERT(5, ({ char a[10]; memset(a, 'x', 5); a[5] = 0; strlen(a); }));
+  ASSERT(0, ({ char a[12] = "abcdefghij"; memmove(a + 1, a, 10); strcmp(a, "aabcdefghij"); }));
+
+  // Bit-fields in char and short units
+  ASSERT(4, sizeof(struct cbits));
+  ASSERT(5329500, ({ struct cbits x = {5, 33, -7, 200}; x.a*1000000 + x.b*10000 + x.c*100 + x.d; }));
+  ASSERT(1, ({ struct cbits x = {5, 33, -7, 200}; *(unsigned *)&x == ((353u << 27) | (505u << 18) | (200u << 9)); }));
+  ASSERT(-6, ({ struct cbits x = {5, 33, -7, 200}; x.c++; x.c; }));
   ASSERT(1, INT_MAX == 34359738367);
   ASSERT(1, INT_MIN < 0 && (unsigned)INT_MIN - 1 == INT_MAX);
   ASSERT(1, (unsigned)-1 == 68719476735);

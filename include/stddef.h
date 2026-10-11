@@ -8,6 +8,9 @@ typedef long ptrdiff_t;
 typedef unsigned int wchar_t;
 typedef long max_align_t;
 
-#define offsetof(type, member) ((size_t)&(((type *)0)->member))
+// Member addresses are in their own type's pointer representation, so
+// measure the offset in chars.
+#define offsetof(type, member) \
+  ((size_t)((char *)&(((type *)0)->member) - (char *)0))
 
 #endif

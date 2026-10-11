@@ -1,7 +1,7 @@
 // A small C library for chibicc on the ACR-7000.
 //
-// Every integer type is one 36-bit word and chars are words too, so
-// strings hold one character per word. Output goes to the line printer
+// Chars are 9 bits, packed four to a 36-bit word; shorts are 18 bits and
+// ints, longs and pointers a word. Output goes to the line printer
 // (device 013) and input comes from the paper tape reader (device 012).
 // Code here runs in supervisor state at IRQL 0 with interrupts never
 // taken, so devices are polled.
@@ -507,8 +507,9 @@ static Header *freep;
 static char *brk;
 static char *heap_start = __heap_start; // may be beyond 18-bit addresses
 
+// The stack pointer as a char pointer.
 static char *stack_pointer(void) {
-  asm("            movr        sp, ac");
+  asm("            movsz       sp, sp, ac, 2");
 }
 
 static Header *more_core(size_t units) {

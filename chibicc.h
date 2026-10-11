@@ -18,11 +18,13 @@
 #include <time.h>
 #include <unistd.h>
 
-// ACR-7000 target: a 36-bit word-addressed machine. Every scalar type
-// (char, short, int, long, pointers, ...) occupies exactly one word, so
-// sizeof(int) == 1 and CHAR_BIT == 36.
+// ACR-7000 target: a 36-bit word-addressed machine with 9-bit chars,
+// four to a word (big-endian), 18-bit shorts and 36-bit ints, longs
+// and pointers. Sizes are in chars; see ptr_unit() for pointers.
 #define WORD_BITS 36
 #define WORD_MASK ((1ULL << WORD_BITS) - 1)
+#define CHAR_BITS 9
+#define WORD_CHARS 4
 
 // Zero-filled objects at least this many words long are placed after
 // the rest of the program.
@@ -154,7 +156,7 @@ struct Obj {
   // Global variable
   bool is_tentative;
   bool is_tls;
-  uint64_t *init_data; // one 36-bit word per element of ty->size
+  uint64_t *init_data; // one 9-bit char per element of ty->size
   Relocation *rel;
 
   // Function
@@ -181,7 +183,8 @@ struct Relocation {
   Relocation *next;
   int offset;
   char **label;
-  long addend;
+  long addend; // in units of the pointer's representation
+  int unit;    // ptr_unit of the pointer (4, 2 or 1)
 };
 
 // AST node
@@ -303,6 +306,7 @@ struct Node {
 };
 
 Node *new_cast(Node *expr, Type *ty);
+int var_start(Type *ty);
 int64_t const_expr(Token **rest, Token *tok);
 Obj *parse(Token *tok);
 
@@ -394,6 +398,7 @@ extern Type *ty_short;
 extern Type *ty_int;
 extern Type *ty_long;
 
+extern Type *ty_schar;
 extern Type *ty_uchar;
 extern Type *ty_ushort;
 extern Type *ty_uint;
@@ -407,6 +412,10 @@ bool is_integer(Type *ty);
 bool is_flonum(Type *ty);
 bool is_numeric(Type *ty);
 bool is_compatible(Type *t1, Type *t2);
+int ptr_unit(Type *ty);
+int value_unit(Type *ty);
+bool is_pointer_like(Type *ty);
+Type *int_promote(Type *ty);
 Type *copy_type(Type *ty);
 Type *pointer_to(Type *base);
 Type *func_type(Type *return_ty);
@@ -423,6 +432,8 @@ void add_type(Node *node);
 void codegen(Obj *prog, FILE *out);
 int align_to(int n, int align);
 int64_t wrap_word(int64_t val, bool is_unsigned);
+int64_t wrap_bits(int64_t val, int bits, bool is_unsigned);
+int64_t wrap_type(int64_t val, Type *ty);
 char *acr_unit_id(char *path);
 char *acr_global_label(char *name);
 

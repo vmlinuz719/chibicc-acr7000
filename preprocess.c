@@ -1059,30 +1059,31 @@ static char *format_time(struct tm *tm) {
 
 void init_macros(void) {
   // Define predefined macros
-  // Target: ACR-7000, 36-bit words, word addressing. Every integer type
-  // and pointer is one word, so CHAR_BIT is 36.
+  // Target: ACR-7000, 36-bit words holding four 9-bit chars or two
+  // 18-bit shorts. int, long, long long and pointers are one word.
   define_macro("__ACR7000__", "1");
   define_macro("__acr7000__", "1");
   define_macro("__C99_MACRO_WITH_VA_ARGS", "1");
-  define_macro("__CHAR_BIT__", "36");
-  define_macro("__SIZEOF_DOUBLE__", "2");
-  define_macro("__SIZEOF_FLOAT__", "1");
-  define_macro("__SIZEOF_INT__", "1");
-  define_macro("__SIZEOF_LONG_DOUBLE__", "2");
-  define_macro("__SIZEOF_LONG_LONG__", "1");
-  define_macro("__SIZEOF_LONG__", "1");
-  define_macro("__SIZEOF_POINTER__", "1");
-  define_macro("__SIZEOF_PTRDIFF_T__", "1");
-  define_macro("__SIZEOF_SHORT__", "1");
-  define_macro("__SIZEOF_SIZE_T__", "1");
+  define_macro("__CHAR_BIT__", "9");
+  define_macro("__CHAR_UNSIGNED__", "1");
+  define_macro("__SIZEOF_DOUBLE__", "8");
+  define_macro("__SIZEOF_FLOAT__", "4");
+  define_macro("__SIZEOF_INT__", "4");
+  define_macro("__SIZEOF_LONG_DOUBLE__", "8");
+  define_macro("__SIZEOF_LONG_LONG__", "4");
+  define_macro("__SIZEOF_LONG__", "4");
+  define_macro("__SIZEOF_POINTER__", "4");
+  define_macro("__SIZEOF_PTRDIFF_T__", "4");
+  define_macro("__SIZEOF_SHORT__", "2");
+  define_macro("__SIZEOF_SIZE_T__", "4");
   define_macro("__SIZE_TYPE__", "unsigned long");
   define_macro("__PTRDIFF_TYPE__", "long");
   define_macro("__WCHAR_TYPE__", "int");
   define_macro("__INT_MAX__", "34359738367");
   define_macro("__LONG_MAX__", "34359738367L");
   define_macro("__LONG_LONG_MAX__", "34359738367LL");
-  define_macro("__SCHAR_MAX__", "34359738367");
-  define_macro("__SHRT_MAX__", "34359738367");
+  define_macro("__SCHAR_MAX__", "255");
+  define_macro("__SHRT_MAX__", "131071");
   define_macro("__STDC_HOSTED__", "1");
   define_macro("__STDC_NO_COMPLEX__", "1");
   define_macro("__STDC_NO_THREADS__", "1");

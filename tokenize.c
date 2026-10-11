@@ -394,7 +394,7 @@ static bool convert_pp_int(Token *tok) {
   if (p != tok->loc + tok->len)
     return false;
 
-  // Infer a type. int, long and long long are all one 36-bit word; like
+  // Infer a type. int, long and long long are all 36 bits; like
   // GCC with constants too large for any type, warn and truncate.
   if (too_large || ((uint64_t)val >> WORD_BITS)) {
     warn_tok(tok, "integer constant does not fit in a 36-bit word; truncated");
@@ -602,7 +602,7 @@ Token *tokenize(File *file) {
     // Character literal
     if (*p == '\'') {
       cur = cur->next = read_char_literal(p, p, ty_int);
-      cur->val = wrap_word(cur->val, false); // char is 36 bits
+      cur->val = wrap_bits(cur->val, CHAR_BITS, ty_char->is_unsigned);
       p += cur->len;
       continue;
     }

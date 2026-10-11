@@ -12,7 +12,7 @@ int main() {
   char *p4 = fn(1, alloca(16), 3);
 
   ASSERT(16, p1 - p2);
-  ASSERT(3, p2 - p3);
+  ASSERT(4, p2 - p3);
   ASSERT(16, p3 - p4);
 
   memcpy(p1, "0123456789abcdef", 16);

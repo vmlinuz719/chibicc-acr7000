@@ -7,27 +7,27 @@ char g6;
 
 int main() {
   ASSERT(1, _Alignof(char));
-  ASSERT(1, _Alignof(short));
-  ASSERT(1, _Alignof(int));
-  ASSERT(1, _Alignof(long));
-  ASSERT(1, _Alignof(long long));
+  ASSERT(2, _Alignof(short));
+  ASSERT(4, _Alignof(int));
+  ASSERT(4, _Alignof(long));
+  ASSERT(4, _Alignof(long long));
   ASSERT(1, _Alignof(char[3]));
-  ASSERT(1, _Alignof(int[3]));
-  ASSERT(1, _Alignof(struct {char a; char b;}[2]));
-  ASSERT(1, _Alignof(struct {char a; long b;}[2]));
+  ASSERT(4, _Alignof(int[3]));
+  ASSERT(4, _Alignof(struct {char a; char b;}[2]));
+  ASSERT(4, _Alignof(struct {char a; long b;}[2]));
 
-  ASSERT(1, ({ _Alignas(char) char x, y; &y-&x; }));
-  ASSERT(1, ({ _Alignas(long) char x, y; &y-&x; }));
+  ASSERT(4, ({ _Alignas(char) char x, y; &y-&x; }));
+  ASSERT(4, ({ _Alignas(long) char x, y; &y-&x; }));
   ASSERT(16, ({ struct { _Alignas(16) char x, y; } a; &a.y-&a.x; }));
   ASSERT(8, ({ struct T { _Alignas(8) char a; }; _Alignof(struct T); }));
 
-  ASSERT(0, (long)(char *)&g4 % 1);
-  ASSERT(0, (long)(char *)&g5 % 1);
+  ASSERT(0, (long)(char *)&g4 % 4);
+  ASSERT(0, (long)(char *)&g5 % 4);
 
   ASSERT(1, ({ char x; _Alignof(x); }));
-  ASSERT(1, ({ int x; _Alignof(x); }));
+  ASSERT(4, ({ int x; _Alignof(x); }));
   ASSERT(1, ({ char x; _Alignof x; }));
-  ASSERT(1, ({ int x; _Alignof x; }));
+  ASSERT(4, ({ int x; _Alignof x; }));
 
   ASSERT(1, _Alignof(char) << 31 >> 31);
   ASSERT(1, _Alignof(char) << 35 >> 35);

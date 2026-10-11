@@ -343,11 +343,14 @@ static uint64_t str_elem(char *p, Type *basety, int i) {
   }
 }
 
+static void write_buf(uint64_t *buf, uint64_t val, int sz);
+
 static Obj *new_string_literal(char *p, Type *ty) {
   Obj *var = new_anon_gvar(ty);
+  int sz = ty->base->size;
   var->init_data = calloc(ty->size, sizeof(uint64_t));
   for (int i = 0; i < ty->array_len; i++)
-    var->init_data[i] = str_elem(p, ty->base, i);
+    write_buf(var->init_data + i * sz, str_elem(p, ty->base, i), sz);
   return var;
 }
 
@@ -525,8 +528,10 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
       ty = ty_bool;
       break;
     case CHAR:
-    case SIGNED + CHAR:
       ty = ty_char;
+      break;
+    case SIGNED + CHAR:
+      ty = ty_schar;
       break;
     case UNSIGNED + CHAR:
       ty = ty_uchar;
@@ -903,8 +908,8 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, VarAttr *attr) 
     Obj *var = new_lvar(get_ident(ty->name), ty);
     if (attr && attr->align)
       var->align = attr->align;
-    if (attr && attr->align > 1)
-      warn_tok(ty->name, "alignment of variables is not supported on the ACR-7000; ignored");
+    if (attr && attr->align > WORD_CHARS)
+      warn_tok(ty->name, "variables cannot be aligned beyond a word on the ACR-7000; ignored");
 
     if (equal(tok, "=")) {
       Node *expr = lvar_initializer(&tok, tok->next, var);
@@ -1388,18 +1393,24 @@ static Node *lvar_initializer(Token **rest, Token *tok, Obj *var) {
   return new_binary(ND_COMMA, lhs, rhs, tok);
 }
 
-// Global initializer images are arrays of 36-bit words, one per unit
-// of sizeof. Every scalar occupies exactly one word.
+// The representation unit of the last pointer-valued expression
+// evaluated with a label, i.e. of a relocation's value.
+static int reloc_unit = WORD_CHARS;
+
+// Global initializer images have one entry per 9-bit char; multi-char
+// scalars are stored big-endian, as in memory.
 static uint64_t read_buf(uint64_t *buf, int sz) {
-  if (sz != 1)
-    unreachable();
-  return *buf;
+  uint64_t val = 0;
+  for (int i = 0; i < sz; i++)
+    val = (val << CHAR_BITS) | buf[i];
+  return val;
 }
 
 static void write_buf(uint64_t *buf, uint64_t val, int sz) {
-  if (sz != 1)
-    unreachable();
-  *buf = val & WORD_MASK;
+  for (int i = sz - 1; i >= 0; i--) {
+    buf[i] = val & ((1 << CHAR_BITS) - 1);
+    val >>= CHAR_BITS;
+  }
 }
 
 static Relocation *
@@ -1446,7 +1457,16 @@ write_gvar_data(Relocation *cur, Initializer *init, Type *ty, uint64_t *buf, int
     error_tok(init->expr->tok, "floating-point is not supported on the ACR-7000");
 
   char **label = NULL;
+  reloc_unit = WORD_CHARS;
   uint64_t val = eval2(init->expr, &label);
+
+  // Convert to the representation of the variable's pointer type (the
+  // parser does not insert this implicit conversion for globals).
+  add_type(init->expr);
+  if (is_pointer_like(init->expr->ty) && is_pointer_like(ty)) {
+    val = (int64_t)val * value_unit(init->expr->ty) / value_unit(ty);
+    reloc_unit = value_unit(ty);
+  }
 
   if (!label) {
     write_buf(buf + offset, val, ty->size);
@@ -1457,6 +1477,7 @@ write_gvar_data(Relocation *cur, Initializer *init, Type *ty, uint64_t *buf, int
   rel->offset = offset;
   rel->label = label;
   rel->addend = val;
+  rel->unit = reloc_unit;
   cur->next = rel;
   return cur->next;
 }
@@ -1819,17 +1840,20 @@ static int64_t eval(Node *node) {
 // expression for a global variable.
 static int64_t eval2_raw(Node *node, char ***label);
 
-// Reduce a compile-time value to what a 36-bit word of the node's type
-// would hold. Values with an unresolved label are addresses plus an
-// addend and are left alone.
+// Reduce a compile-time value to what the node's type would hold.
+// Values with an unresolved label are addresses plus an addend (in
+// units of the pointer's representation) and are left alone.
 static int64_t eval2(Node *node, char ***label) {
   int64_t val = eval2_raw(node, label);
-  if ((label && *label) || is_flonum(node->ty))
+  if (label && *label) {
+    if (is_pointer_like(node->ty))
+      reloc_unit = value_unit(node->ty);
     return val;
-  if (node->ty->kind == TY_BOOL)
-    return val != 0;
+  }
+  if (is_flonum(node->ty))
+    return val;
   if (is_integer(node->ty) || node->ty->kind == TY_PTR)
-    return wrap_word(val, node->ty->is_unsigned);
+    return wrap_type(val, node->ty);
   return val;
 }
 
@@ -1898,16 +1922,17 @@ static int64_t eval2_raw(Node *node, char ***label) {
     return eval(node->lhs) || eval(node->rhs);
   case ND_CAST: {
     int64_t val = eval2(node->lhs, label);
+    // Pointer conversions change the representation.
+    if (is_pointer_like(node->lhs->ty) && is_pointer_like(node->ty))
+      val = val * value_unit(node->lhs->ty) / value_unit(node->ty);
     if (label && *label)
       return val;
-    if (node->ty->kind == TY_BOOL)
-      return val != 0;
     if (is_integer(node->ty) || node->ty->kind == TY_PTR)
-      return wrap_word(val, node->ty->is_unsigned);
+      return wrap_type(val, node->ty);
     return val;
   }
   case ND_ADDR:
-    return eval_rval(node->lhs, label);
+    return eval_rval(node->lhs, label) / value_unit(node->ty);
   case ND_LABEL_VAL:
     *label = &node->unique_label;
     return 0;
@@ -1916,7 +1941,7 @@ static int64_t eval2_raw(Node *node, char ***label) {
       error_tok(node->tok, "not a compile-time constant");
     if (node->ty->kind != TY_ARRAY)
       error_tok(node->tok, "invalid initializer");
-    return eval_rval(node->lhs, label) + node->member->offset;
+    return (eval_rval(node->lhs, label) + node->member->offset) / value_unit(node->ty);
   case ND_VAR:
     if (!label)
       error_tok(node->tok, "not a compile-time constant");
@@ -1931,20 +1956,31 @@ static int64_t eval2_raw(Node *node, char ***label) {
   error_tok(node->tok, "not a compile-time constant");
 }
 
+// The address of an lvalue, as a label and an offset in chars.
 static int64_t eval_rval(Node *node, char ***label) {
   switch (node->kind) {
   case ND_VAR:
     if (node->var->is_local)
       error_tok(node->tok, "not a compile-time constant");
     *label = &node->var->name;
-    return 0;
+    return var_start(node->var->ty);
   case ND_DEREF:
-    return eval2(node->lhs, label);
+    return eval2(node->lhs, label) * value_unit(node->lhs->ty);
   case ND_MEMBER:
     return eval_rval(node->lhs, label) + node->member->offset;
   }
 
   error_tok(node->tok, "invalid initializer");
+}
+
+// Where an object of type `ty` starts within its first word: chars and
+// shorts that are not part of an array or struct occupy the low end of a
+// word of their own.
+int var_start(Type *ty) {
+  if (ty->size < WORD_CHARS && ty->kind != TY_ARRAY && ty->kind != TY_STRUCT &&
+      ty->kind != TY_UNION)
+    return WORD_CHARS - ty->size;
+  return 0;
 }
 
 static bool is_const_expr(Node *node) {
@@ -2367,6 +2403,19 @@ static Node *shift(Token **rest, Token *tok) {
 // so that p+n points to the location n elements (not bytes) ahead of p.
 // In other words, we need to scale an integer value before adding to a
 // pointer value. This function takes care of the scaling.
+// The difference between pointers to consecutive elements of type
+// `base`, in units of the pointer's representation (see ptr_unit).
+static Node *ptr_step(Type *base, Token *tok) {
+  int unit = ptr_unit(base);
+  if (base->kind == TY_VLA) {
+    Node *node = new_var_node(base->vla_size, tok);
+    if (unit == 1)
+      return node;
+    return new_binary(ND_DIV, node, new_long(unit, tok), tok);
+  }
+  return new_long(MAX(base->size / unit, 1), tok);
+}
+
 static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
   add_type(lhs);
   add_type(rhs);
@@ -2385,14 +2434,8 @@ static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
     rhs = tmp;
   }
 
-  // VLA + num
-  if (lhs->ty->base->kind == TY_VLA) {
-    rhs = new_binary(ND_MUL, rhs, new_var_node(lhs->ty->base->vla_size, tok), tok);
-    return new_binary(ND_ADD, lhs, rhs, tok);
-  }
-
   // ptr + num
-  rhs = new_binary(ND_MUL, rhs, new_long(lhs->ty->base->size, tok), tok);
+  rhs = new_binary(ND_MUL, rhs, ptr_step(lhs->ty->base, tok), tok);
   return new_binary(ND_ADD, lhs, rhs, tok);
 }
 
@@ -2405,18 +2448,9 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
   if (is_numeric(lhs->ty) && is_numeric(rhs->ty))
     return new_binary(ND_SUB, lhs, rhs, tok);
 
-  // VLA + num
-  if (lhs->ty->base->kind == TY_VLA) {
-    rhs = new_binary(ND_MUL, rhs, new_var_node(lhs->ty->base->vla_size, tok), tok);
-    add_type(rhs);
-    Node *node = new_binary(ND_SUB, lhs, rhs, tok);
-    node->ty = lhs->ty;
-    return node;
-  }
-
   // ptr - num
   if (lhs->ty->base && is_integer(rhs->ty)) {
-    rhs = new_binary(ND_MUL, rhs, new_long(lhs->ty->base->size, tok), tok);
+    rhs = new_binary(ND_MUL, rhs, ptr_step(lhs->ty->base, tok), tok);
     add_type(rhs);
     Node *node = new_binary(ND_SUB, lhs, rhs, tok);
     node->ty = lhs->ty;
@@ -2427,7 +2461,7 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
   if (lhs->ty->base && rhs->ty->base) {
     Node *node = new_binary(ND_SUB, lhs, rhs, tok);
     node->ty = ty_long;
-    return new_binary(ND_DIV, node, new_num(lhs->ty->base->size, tok), tok);
+    return new_binary(ND_DIV, node, ptr_step(lhs->ty->base, tok), tok);
   }
 
   error_tok(tok, "invalid operands");
@@ -2597,7 +2631,7 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
       if (consume(&tok, tok, ":")) {
         mem->is_bitfield = true;
         mem->bit_width = const_expr(&tok, tok);
-        if (mem->bit_width < 0 || mem->bit_width > mem->ty->size * WORD_BITS)
+        if (mem->bit_width < 0 || mem->bit_width > mem->ty->size * CHAR_BITS)
           error_tok(tok, "invalid bit-field width");
       }
 
@@ -2704,6 +2738,18 @@ static Type *struct_decl(Token **rest, Token *tok) {
   if (ty->size < 0)
     return ty;
 
+  // Members that are not naturally aligned cannot be accessed on the
+  // ACR-7000, so packed structs are laid out normally.
+  if (ty->is_packed) {
+    warn_tok(tok, "packed structs are not supported on the ACR-7000; ignored");
+    ty->is_packed = false;
+  }
+
+  // Structs are word-aligned so that pointers to them are word
+  // addresses (see ptr_unit).
+  if (ty->align < WORD_CHARS)
+    ty->align = WORD_CHARS;
+
   // Assign offsets within the struct to members.
   int bits = 0;
 
@@ -2711,27 +2757,29 @@ static Type *struct_decl(Token **rest, Token *tok) {
     if (mem->is_bitfield && mem->bit_width == 0) {
       // Zero-width anonymous bitfield has a special meaning.
       // It affects only alignment.
-      bits = align_to(bits, mem->ty->size * WORD_BITS);
+      bits = align_to(bits, mem->ty->size * CHAR_BITS);
     } else if (mem->is_bitfield) {
       int sz = mem->ty->size;
-      if (bits / (sz * WORD_BITS) != (bits + mem->bit_width - 1) / (sz * WORD_BITS))
-        bits = align_to(bits, sz * WORD_BITS);
+      if (bits / (sz * CHAR_BITS) != (bits + mem->bit_width - 1) / (sz * CHAR_BITS))
+        bits = align_to(bits, sz * CHAR_BITS);
 
-      mem->offset = align_down(bits / WORD_BITS, sz);
-      mem->bit_offset = bits % (sz * WORD_BITS);
+      mem->offset = align_down(bits / CHAR_BITS, sz);
+      // Bit-fields are allocated in memory order, which is from the most
+      // significant end of the (big-endian) storage unit; bit_offset
+      // counts from the least significant end.
+      mem->bit_offset = sz * CHAR_BITS - bits % (sz * CHAR_BITS) - mem->bit_width;
       bits += mem->bit_width;
     } else {
-      if (!ty->is_packed)
-        bits = align_to(bits, mem->align * WORD_BITS);
-      mem->offset = bits / WORD_BITS;
-      bits += mem->ty->size * WORD_BITS;
+      bits = align_to(bits, mem->align * CHAR_BITS);
+      mem->offset = bits / CHAR_BITS;
+      bits += mem->ty->size * CHAR_BITS;
     }
 
-    if (!ty->is_packed && ty->align < mem->align)
+    if (ty->align < mem->align)
       ty->align = mem->align;
   }
 
-  ty->size = align_to(bits, ty->align * WORD_BITS) / WORD_BITS;
+  ty->size = align_to(bits, ty->align * CHAR_BITS) / CHAR_BITS;
   return ty;
 }
 
@@ -2745,7 +2793,9 @@ static Type *union_decl(Token **rest, Token *tok) {
 
   // If union, we don't have to assign offsets because they
   // are already initialized to zero. We need to compute the
-  // alignment and the size though.
+  // alignment and the size though. Unions are word-aligned like structs.
+  if (ty->align < WORD_CHARS)
+    ty->align = WORD_CHARS;
   for (Member *mem = ty->members; mem; mem = mem->next) {
     if (ty->align < mem->align)
       ty->align = mem->align;
@@ -3304,8 +3354,8 @@ static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
     var->is_tls = attr->is_tls;
     if (attr->align)
       var->align = attr->align;
-    if (attr->align > 1)
-      warn_tok(ty->name, "alignment of variables is not supported on the ACR-7000; ignored");
+    if (attr->align > WORD_CHARS)
+      warn_tok(ty->name, "variables cannot be aligned beyond a word on the ACR-7000; ignored");
 
     if (equal(tok, "="))
       gvar_initializer(&tok, tok->next, var);

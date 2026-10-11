@@ -65,7 +65,7 @@ int main() {
   ASSERT('f', ({ char x[2][4]={"abc","def"}; x[1][2]; }));
 
   ASSERT(4, ({ int x[]={1,2,3,4}; x[3]; }));
-  ASSERT(4, ({ int x[]={1,2,3,4}; sizeof(x); }));
+  ASSERT(16, ({ int x[]={1,2,3,4}; sizeof(x); }));
   ASSERT(4, ({ char x[]="foo"; sizeof(x); }));
 
   ASSERT(4, ({ typedef char T[]; T x="foo"; T y="x"; sizeof(x); }));
@@ -95,10 +95,10 @@ int main() {
 
   ASSERT(1, ({ typedef struct {int a,b;} T; T x={1,2}; T y=x; y.a; }));
 
-  ASSERT(0x01020304, ({ union { int a; char b[4]; } x={0x01020304}; x.b[0]; }));
-  ASSERT(0, ({ union { int a; char b[4]; } x={0x01020304}; x.b[1]; }));
+  ASSERT(0, ({ union { int a; char b[4]; } x={0x01020304}; x.b[0]; }));
+  ASSERT(64, ({ union { int a; char b[4]; } x={0x01020304}; x.b[1]; }));
 
-  ASSERT(4, ({ union { struct { char a,b,c,d; } e; int f; } x={{4,3,2,1}}; x.f; }));
+  ASSERT(537658369, ({ union { struct { char a,b,c,d; } e; int f; } x={{4,3,2,1}}; x.f; }));
 
   ASSERT(3, g3);
   ASSERT(4, g4);
@@ -119,10 +119,10 @@ int main() {
   ASSERT(0, g12[1].a[0]);
   ASSERT(0, g12[1].a[1]);
 
-  ASSERT(0x01020304, g13[0].b[0]);
-  ASSERT(0, g13[0].b[1]);
-  ASSERT(0x05060708, g13[1].b[0]);
-  ASSERT(0, g13[1].b[1]);
+  ASSERT(0, g13[0].b[0]);
+  ASSERT(64, g13[0].b[1]);
+  ASSERT(0, g13[1].b[0]);
+  ASSERT(321, g13[1].b[1]);
 
   ASSERT(7, sizeof(g17));
   ASSERT(10, sizeof(g18));
@@ -143,7 +143,7 @@ int main() {
   ASSERT(3, g24);
   ASSERT(3, *g25);
   ASSERT(2, *g27);
-  ASSERT(3, *g28);
+  ASSERT(402653184, *g28);
   ASSERT(1, *(int *)g29);
 
   ASSERT(1, g31[0]);
@@ -178,8 +178,8 @@ int main() {
   ASSERT(3, sizeof(g60));
   ASSERT(6, sizeof(g61));
 
-  ASSERT(4, sizeof(g65));
-  ASSERT(7, sizeof(g66));
+  ASSERT(7, sizeof(g65));
+  ASSERT(10, sizeof(g66));
   ASSERT(0, strcmp(g65.b, "oo"));
   ASSERT(0, strcmp(g66.b, "oobar"));
 
@@ -210,8 +210,8 @@ int main() {
   ASSERT(3, sizeof(g60));
   ASSERT(6, sizeof(g61));
 
-  ASSERT(4, sizeof(g65));
-  ASSERT(7, sizeof(g66));
+  ASSERT(7, sizeof(g65));
+  ASSERT(10, sizeof(g66));
   ASSERT(0, strcmp(g65.b, "oo"));
   ASSERT(0, strcmp(g66.b, "oobar"));
 
@@ -248,10 +248,10 @@ int main() {
   ASSERT(5, ((struct { int a,b,c; }){ .c=5 }).c);
   ASSERT(0, ((struct { int a,b,c; }){ .c=5 }).a);
 
-  ASSERT(0x00ff, ({ union { unsigned short a; char b[2]; } x={.b[0]=0xff}; x.a; }));
-  ASSERT(0, ({ union { unsigned short a; char b[2]; } x={.b[1]=0xff}; x.a; }));
+  ASSERT(130560, ({ union { unsigned short a; char b[2]; } x={.b[0]=0xff}; x.a; }));
+  ASSERT(255, ({ union { unsigned short a; char b[2]; } x={.b[1]=0xff}; x.a; }));
 
-  ASSERT(0, g50.a);
+  ASSERT(9216, g50.a);
   ASSERT(0, g51[0].a);
   ASSERT(0, g51[1].a);
 

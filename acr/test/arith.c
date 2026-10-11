@@ -68,8 +68,8 @@ int main() {
   ASSERT(1, !0);
   ASSERT(1, !(char)0);
   ASSERT(0, !(long)3);
-  ASSERT(1, sizeof(!(char)0));
-  ASSERT(1, sizeof(!(long)0));
+  ASSERT(4, sizeof(!(char)0));
+  ASSERT(4, sizeof(!(long)0));
 
   ASSERT(-1, ~0);
   ASSERT(0, ~-1);
@@ -112,8 +112,8 @@ int main() {
   ASSERT(1, 1?1:2);
   ASSERT(-1, 0?-2:-1);
   ASSERT(-2, 1?-2:-1);
-  ASSERT(1, sizeof(0?1:2));
-  ASSERT(1, sizeof(0?(long)1:(long)2));
+  ASSERT(4, sizeof(0?1:2));
+  ASSERT(4, sizeof(0?(long)1:(long)2));
   ASSERT(-1, 0?(long)-2:-1);
   ASSERT(-1, 0?-2:(long)-1);
   ASSERT(-2, 1?(long)-2:-1);
@@ -126,9 +126,9 @@ int main() {
   ASSERT(-20, ({ int x; int *p=&x; p-20-p; }));
   ASSERT(1, ({ int x; int *p=&x; p-20-p<0; }));
 
-  ASSERT(15, (char *)0xfffffffff - (char *)0xffffffff0);
-  ASSERT(-15, (char *)0xffffffff0 - (char *)0xfffffffff);
-  ASSERT(1, (void *)0xfffffffff > (void *)0);
+  ASSERT(15, (char *)0xffffffffffffffff - (char *)0xfffffffffffffff0);
+  ASSERT(-15, (char *)0xfffffffffffffff0 - (char *)0xffffffffffffffff);
+  ASSERT(1, (void *)0xffffffffffffffff > (void *)0);
 
   ASSERT(3, 3?:5);
   ASSERT(5, 0?:5);

@@ -11,7 +11,8 @@
 //   ;@ref <label> <name>           reference to an external symbol
 //   ;@comm <label> <words> <name>  common (tentative) definition
 //   ;@zero <label> <words>         region crt0 must clear
-//   ;@fixup <word> <label> <n>     crt0 stores address of <label> + n at <word>
+//   ;@fixup <word> <label> <n> <s> crt0 stores (<label> << <s>) + n at <word>
+//                                  (a char pointer has s = 2, a short pointer 1)
 //
 // The startup module sets up the stack, clears zero-fill regions,
 // applies fixups (asm2 has no address arithmetic) and calls main().
@@ -158,8 +159,10 @@ static void copy_unit(FILE *out, char *text) {
         strarray_push(&zero_entries, format("%s, %s", a, b));
       } else if (!strcmp(kw, "fixup") && b && c) {
         int64_t addend = strtoll(c, NULL, 10);
+        char *d = strtok(NULL, " \t");
         strarray_push(&fixup_entries,
-                      format("%s, %s, 0%lo", a, b, (unsigned long)(addend & WORD_MASK)));
+                      format("%s, %s, 0%lo, %s", a, b, (unsigned long)(addend & WORD_MASK),
+                             d ? d : "0"));
       }
     }
     line = *eol ? eol + 1 : eol;
@@ -184,12 +187,14 @@ static char *crt0(uint64_t stack_top) {
     "            ldea        x1, $$fixtab             ; apply address fixups\n"
     "            ld          x2, 0(x1)\n"
     "            movrn.rz    x2, x2\n"
-    "            jmp         .6\n"
+    "            jmp         .8\n"
     "            ld          x3, 1(x1)\n"
+    "            ld          x4, 3(x1)\n"
+    "            edit        x4, $$fsh                ; x3 <<= x4\n"
     "            add         x3, 2(x1)\n"
     "            st          x3, 0(x2)\n"
-    "            ldea        x1, 3(x1)\n"
-    "            jmp         .-7\n"
+    "            ldea        x1, 4(x1)\n"
+    "            jmp         .-9\n"
     "\n"
     "            ldea        x1, $$zerotab            ; clear zero-fill regions\n"
     "            ld          x2, 0(x1)\n"
@@ -239,7 +244,17 @@ static char *crt0(uint64_t stack_top) {
     "$$sgn:      dw          0400000000000\n"
     "$$shl:      movsz       x0, x0, x0\n"
     "$$shr:      movsrz      x0, x0, x0\n"
-    "$$sar:      movsr       x0, x0, x0\n",
+    "$$sar:      movsr       x0, x0, x0\n"
+    "$$fsh:      movsz       x3, x3, x3\n"
+    "\n"
+    "        ; Byte pointer fields (shift << 27) for chars 0-3 and shorts 0-1\n"
+    "        ; of a word, which are stored big-endian\n"
+    "\n"
+    "$$bp:       dw          033000000000, 022000000000, 011000000000, 0\n"
+    "$$hp:       dw          022000000000, 0\n"
+    "$$s27:      dw          033000000000\n"
+    "$$s18:      dw          022000000000\n"
+    "$$s9:       dw          011000000000\n",
     acr_global_label("main"), acr_global_label("exit"),
     acr_global_label("__acr_trap"), (unsigned long)stack_top);
 

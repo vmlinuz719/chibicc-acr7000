@@ -5,14 +5,14 @@ typedef struct {
   int a;
   char b;
   int c;
-  long d;
+  double d;
 } T;
 
 int main() {
   ASSERT(0, offsetof(T, a));
-  ASSERT(1, offsetof(T, b));
-  ASSERT(2, offsetof(T, c));
-  ASSERT(3, offsetof(T, d));
+  ASSERT(4, offsetof(T, b));
+  ASSERT(8, offsetof(T, c));
+  ASSERT(12, offsetof(T, d));
 
   printf("OK\n");
   return 0;

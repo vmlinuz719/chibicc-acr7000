@@ -1,8 +1,8 @@
 #ifndef __STDINT_H
 #define __STDINT_H
 
-// ACR-7000: every integer type is one 36-bit word, so the optional
-// exact-width types (int8_t, uint32_t, ...) do not exist.
+// ACR-7000: chars are 9 bits, shorts 18 and ints and longs 36, so none
+// of the optional exact-width types (int8_t, uint32_t, ...) exist.
 
 typedef signed char int_least8_t;
 typedef short int_least16_t;
@@ -23,22 +23,22 @@ typedef unsigned long uintptr_t;
 typedef long intmax_t;
 typedef unsigned long uintmax_t;
 
-#define INT_LEAST8_MIN (-34359738367 - 1)
-#define INT_LEAST8_MAX 34359738367
-#define UINT_LEAST8_MAX 68719476735U
-#define INT_LEAST16_MIN (-34359738367 - 1)
-#define INT_LEAST16_MAX 34359738367
-#define UINT_LEAST16_MAX 68719476735U
+#define INT_LEAST8_MIN (-256)
+#define INT_LEAST8_MAX 255
+#define UINT_LEAST8_MAX 511
+#define INT_LEAST16_MIN (-131072)
+#define INT_LEAST16_MAX 131071
+#define UINT_LEAST16_MAX 262143
 #define INT_LEAST32_MIN (-34359738367 - 1)
 #define INT_LEAST32_MAX 34359738367
 #define UINT_LEAST32_MAX 68719476735U
 
-#define INT_FAST8_MIN INT_LEAST8_MIN
-#define INT_FAST8_MAX INT_LEAST8_MAX
-#define UINT_FAST8_MAX UINT_LEAST8_MAX
-#define INT_FAST16_MIN INT_LEAST16_MIN
-#define INT_FAST16_MAX INT_LEAST16_MAX
-#define UINT_FAST16_MAX UINT_LEAST16_MAX
+#define INT_FAST8_MIN INT_LEAST32_MIN
+#define INT_FAST8_MAX INT_LEAST32_MAX
+#define UINT_FAST8_MAX UINT_LEAST32_MAX
+#define INT_FAST16_MIN INT_LEAST32_MIN
+#define INT_FAST16_MAX INT_LEAST32_MAX
+#define UINT_FAST16_MAX UINT_LEAST32_MAX
 #define INT_FAST32_MIN INT_LEAST32_MIN
 #define INT_FAST32_MAX INT_LEAST32_MAX
 #define UINT_FAST32_MAX UINT_LEAST32_MAX

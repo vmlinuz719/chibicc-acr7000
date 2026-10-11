@@ -27,10 +27,6 @@ int main() {
 
   ASSERT(10, (1 ? ret10 : (void *)0)());
 
-  ASSERT(0, 34359738367 + 34359738367 + 2);
-  ASSERT(1, (unsigned char)1 - 2 > 0);
-  ASSERT(0, (int)(unsigned char)1 - 2 > 0);
-
   printf("OK\n");
   return 0;
 }

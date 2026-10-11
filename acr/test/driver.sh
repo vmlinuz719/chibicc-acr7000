@@ -294,7 +294,7 @@ echo 'double f(double x) { return x * 2; }' > $tmp/fp.c
 check 'floating point'
 echo 'int g = (int)2.5; int main() { return sizeof(double) + g; }' > $tmp/fp.c
 $chibicc -o $tmp/foo $tmp/fp.c && $run $tmp/foo
-[ "$?" = 4 ]
+[ "$?" = 10 ]
 check 'floating point constant expressions'
 
 # Linking
