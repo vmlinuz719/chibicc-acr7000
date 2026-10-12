@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACR-7000 Relocation Types</title>
+<style>
+  :root {
+    --bg: #fbfaf7;
+    --fg: #1f1f1d;
+    --muted: #66645e;
+    --border: #dcd9d0;
+    --head-bg: #efece4;
+    --row-alt: #f5f3ed;
+    --code-bg: #ece9e0;
+    --accent: #8a4b14;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #1a1a18;
+      --fg: #e6e4de;
+      --muted: #a09d94;
+      --border: #3a3935;
+      --head-bg: #262522;
+      --row-alt: #20201d;
+      --code-bg: #2c2b27;
+      --accent: #e0a066;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #1a1a18;
+    --fg: #e6e4de;
+    --muted: #a09d94;
+    --border: #3a3935;
+    --head-bg: #262522;
+    --row-alt: #20201d;
+    --code-bg: #2c2b27;
+    --accent: #e0a066;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px 16px 48px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  h2 { font-size: 1.15rem; margin: 32px 0 8px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  code {
+    font: 0.88em/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    background: var(--code-bg);
+    padding: 1px 4px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; min-width: 860px; }
+  th, td {
+    text-align: left;
+    vertical-align: top;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  th { background: var(--head-bg); font-weight: 600; white-space: nowrap; }
+  tbody tr:nth-child(even) { background: var(--row-alt); }
+  tbody tr:last-child td { border-bottom: none; }
+  td.name { font-weight: 600; color: var(--accent); white-space: nowrap; }
+  td.name code { background: none; padding: 0; color: inherit; }
+  td.val code { white-space: nowrap; }
+  td code { white-space: normal; }
+  ul { padding-left: 20px; }
+  li { margin: 6px 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ACR-7000 Relocation Types</h1>
+  <p class="sub">For the ELF-like object format. S = symbol address, A = addend,
+    P = address of the instruction or word being patched, DP = <code>__dp_base</code>.
+    All addresses are word addresses.</p>
+
+  <div class="wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Type</th>
+        <th>Field</th>
+        <th>Value</th>
+        <th>Overflow check</th>
+        <th>Used by</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="name"><code>R_ACR_ADDR18</code></td>
+        <td>bits 0–17 (displacement)</td>
+        <td class="val"><code>S+A</code></td>
+        <td>fits a signed 18-bit field; an absolute address must be below 0400000</td>
+        <td><code>jmp label</code>, <code>calls f</code>, <code>ld x0, var</code>, <code>ld x0, tab(x1)</code>, <code>@label</code>, <code>ldea</code>/<code>addea label</code>, <code>edit x1, $$shl</code></td>
+      </tr>
+      <tr>
+        <td class="name"><code>R_ACR_PCREL18</code></td>
+        <td>bits 0–17 with index mode 2 (<code>.label</code>)</td>
+        <td class="val"><code>S+A−P</code></td>
+        <td>signed 18-bit</td>
+        <td><code>jmp .rd_wait</code> and other hand-written code, when the target is in another section or unit</td>
+      </tr>
+      <tr>
+        <td class="name"><code>R_ACR_DPREL18</code></td>
+        <td>bits 0–17 with index mode 1 (<code>_label</code>)</td>
+        <td class="val"><code>S+A−DP</code></td>
+        <td>signed 18-bit</td>
+        <td><code>ld x0, _var</code>: references to data in the direct page</td>
+      </tr>
+      <tr>
+        <td class="name"><code>R_ACR_PAGE18</code></td>
+        <td>bits 0–17; bits 18–35 kept</td>
+        <td class="val"><code>(S+A) &gt;&gt; 9</code></td>
+        <td>unsigned 18-bit (a 27-bit address always fits); low 9 bits of S+A must be zero</td>
+        <td>Setting the direct page base in CW, e.g. <code>cw: dw %page(__dp_base)</code> with other CW bits (such as the IRQL) in the same word</td>
+      </tr>
+      <tr>
+        <td class="name"><code>R_ACR_HI18</code></td>
+        <td>bits 0–17 of <code>ldeas</code></td>
+        <td class="val"><code>(S+A) &gt;&gt; 17</code></td>
+        <td>bits 34 and 35 of S+A must agree (a 27-bit address always passes)</td>
+        <td><code>ldeas x, %hi(sym)</code></td>
+      </tr>
+      <tr>
+        <td class="name"><code>R_ACR_LO17</code></td>
+        <td>bits 0–17 of <code>addea</code></td>
+        <td class="val"><code>(S+A) &amp; 0377777</code></td>
+        <td>none (the result is always positive)</td>
+        <td><code>addea x, %lo(sym)</code></td>
+      </tr>
+      <tr>
+        <td class="name"><code>R_ACR_WORD36</code></td>
+        <td>the whole word</td>
+        <td class="val"><code>S+A</code>, truncated to 36 bits</td>
+        <td>none</td>
+        <td><code>dw label</code>: initialized pointers to word-aligned objects and functions, <code>&amp;a[3]</code>, and chibicc's address words for far objects</td>
+      </tr>
+      <tr>
+        <td class="name"><code>R_ACR_ADDR27</code></td>
+        <td>bits 0–26; bits 27–35 kept</td>
+        <td class="val"><code>S+A</code></td>
+        <td>27-bit</td>
+        <td>Exception and interrupt vectors, indirect words with auto-increment, hardware byte pointers, <code>sch</code>/<code>rch</code>/<code>wch</code> and <code>clist</code> channel words</td>
+      </tr>
+      <tr>
+        <td class="name"><code>R_ACR_HPTR36</code></td>
+        <td>the whole word</td>
+        <td class="val"><code>(S &lt;&lt; 1) + A</code></td>
+        <td>none</td>
+        <td>C <code>short *</code> initializers</td>
+      </tr>
+      <tr>
+        <td class="name"><code>R_ACR_CPTR36</code></td>
+        <td>the whole word</td>
+        <td class="val"><code>(S &lt;&lt; 2) + A</code></td>
+        <td>none</td>
+        <td>C <code>char *</code> and <code>void *</code> initializers</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>Notes</h2>
+  <ul>
+    <li><strong>Addends.</strong> Use RELA-style relocations with an explicit addend: an 18-bit in-place field can't hold the addend for a 36-bit target. For <code>R_ACR_HPTR36</code> and <code>R_ACR_CPTR36</code> the addend is in the pointer's own units (halves or quarters).</li>
+    <li><strong><code>cdata</code></strong> puts an unsigned 18-bit address in bits 0–17. It can reuse <code>R_ACR_ADDR18</code>'s patch logic, but needs an unsigned overflow check (or its own type, <code>R_ACR_ADDR18U</code>).</li>
+    <li><strong><code>R_ACR_WORD36</code> vs. <code>R_ACR_ADDR27</code>.</strong> WORD36 is plain C data, where <code>&amp;a[-1]</code> must wrap at 36 bits. ADDR27 keeps the bits above the address field and must not carry into them.</li>
+    <li><strong>HI18/LO17.</strong> <code>ldeas</code> shifts by 17, so the low part is never negative: no carry adjustment, and the two relocations need not be paired or adjacent. When the low part is zero the <code>addea</code> can be dropped.</li>
+    <li><strong><code>__dp_base</code></strong> is defined by the linker and aligned to 512 words, since the hardware base is (CW bits 0–17) × 512. The <code>_disp</code> window is DP−0400000 to DP+0377777. Record it where a loader can find it, so a loader that sets CW itself uses the value the linker assumed.</li>
+    <li><strong>PAGE18 with <code>ldea</code></strong> works only for page numbers below 0400000 (addresses below 2<sup>26</sup>); above that <code>ldea</code> sign-extends into the upper bits.</li>
+    <li><strong>Not needed:</strong> I/O device numbers, byte sizes, shift counts and <code>save</code> masks (asm2 accepts no labels there); GOT/PLT/COPY types (no dynamic linking).</li>
+  </ul>
+</main>
+</body>
+</html>
